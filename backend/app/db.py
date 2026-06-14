@@ -46,8 +46,12 @@ def init_db(reset=False):
         conn.executescript(f.read())   # all CREATE ... IF NOT EXISTS — idempotent
     conn.commit()
 
-    empty = conn.execute("SELECT COUNT(*) FROM obligations").fetchone()[0] == 0
-    if empty:
+    # "Already initialized?" must key off a table the demo RESET PRESERVES
+    # (networks/parties), NOT a transactional table it clears (obligations).
+    # Otherwise a post-reset DB looks "empty" and re-seeding collides on the
+    # surviving networks row. Seed only a genuinely fresh DB (no networks).
+    initialized = conn.execute("SELECT COUNT(*) FROM networks").fetchone()[0] > 0
+    if not initialized:
         _seed_fresh(conn)              # first run / empty DB only — never overwrites data
     conn.close()
 

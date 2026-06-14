@@ -63,20 +63,22 @@ OBLIGATIONS = [
 def seed(conn):
     from . import cycles, refdata
     cur = conn.cursor()
+    # Reference/identity inserts use OR IGNORE so a partially-seeded or post-reset
+    # DB (networks/parties kept) can never raise a UNIQUE collision at startup.
     cur.execute(
-        "INSERT INTO networks (network_id, name, cycle_length_days, cut_off_rule, "
+        "INSERT OR IGNORE INTO networks (network_id, name, cycle_length_days, cut_off_rule, "
         "settlement_lag_days, term_mode, default_on_no_action, cost_per_payment, "
         "cost_components, upload_cutoff_offset_days, processing_cutoff_offset_days) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)", NETWORK)
-    cur.executemany("INSERT INTO currencies (code, minor_unit_exponent) VALUES (?,?)",
+    cur.executemany("INSERT OR IGNORE INTO currencies (code, minor_unit_exponent) VALUES (?,?)",
                     refdata.CURRENCIES)
     # jurisdiction (ISO-3) derived from each party's country (Delos seam).
     cur.executemany(
-        "INSERT INTO parties (party_id,legal_name,tax_id,country,city,group_id,on_network,jurisdiction) "
+        "INSERT OR IGNORE INTO parties (party_id,legal_name,tax_id,country,city,group_id,on_network,jurisdiction) "
         "VALUES (?,?,?,?,?,?,?,?)",
         [p[:7] + (refdata.iso3(p[3]),) for p in PARTIES])
     cur.executemany(
-        "INSERT INTO party_networks (party_id,network_id,role) VALUES (?,1,?)",
+        "INSERT OR IGNORE INTO party_networks (party_id,network_id,role) VALUES (?,1,?)",
         [(p[0], p[7]) for p in PARTIES])
     # Money is stored in minor units (cents): multiply the human figures here.
     cur.executemany(
