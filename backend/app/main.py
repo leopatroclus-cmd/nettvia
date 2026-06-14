@@ -964,6 +964,167 @@ def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, n
 
 
 # ---------------------------------------------------------------------------
+# Statement summary (Phase C): the presentation-grade cycle reveal — network
+# headline + per-party breakdown, computed at render from net_positions +
+# obligations + canonical_invoices. Savings show their assumptions, never exact.
+# ---------------------------------------------------------------------------
+
+# Adjustable assumptions, displayed on the statement so the numbers are defensible.
+WIRE_FEE_MAJOR_DEFAULT = 30.0    # € per international payment avoided
+FX_RATE_DEFAULT = 0.006          # 0.6% spread on cross-currency netted value
+
+
+def _money_list(conn, by_ccy):
+    out = []
+    for c in sorted(by_ccy):
+        exp = refdata.exponent(conn, c)
+        out.append({"currency": c, "minor": by_ccy[c],
+                    "major": refdata.to_major(by_ccy[c], exp)})
+    return out
+
+
+def _statement_summary(conn, cycle, wire_fee_minor, fx_rate):
+    """Network headline + per-party breakdown for a cycle's netting set."""
+    result = netting.compute(conn, cycle)           # guards Σnet=0 + reconstruction
+    invoices, positions = result["invoices"], result["positions"]
+    names = {r["party_id"]: r for r in
+             conn.execute("SELECT party_id, legal_name, tax_id FROM parties")}
+    refs = {}   # canonical_invoice_id -> source invoice_number (from the AR row)
+    for ci in invoices:
+        row = conn.execute("SELECT invoice_number FROM obligations WHERE obligation_id = ?",
+                           (ci["ar_obligation_id"],)).fetchone()
+        refs[ci["canonical_invoice_id"]] = row["invoice_number"] if row else None
+
+    # Network value aggregates (per currency).
+    gross_by_ccy, net_by_ccy = {}, {}
+    for ci in invoices:
+        gross_by_ccy[ci["currency"]] = gross_by_ccy.get(ci["currency"], 0) + ci["gross_amount_minor"]
+    for s in positions:
+        if s["net"] > 0:
+            net_by_ccy[s["currency"]] = net_by_ccy.get(s["currency"], 0) + s["net"]
+
+    # Primary currency = largest gross; anything else is "cross-currency" value.
+    primary = max(gross_by_ccy, key=gross_by_ccy.get) if gross_by_ccy else None
+    cross_value = sum(v for c, v in gross_by_ccy.items() if c != primary)
+
+    total_gross = sum(gross_by_ccy.values())        # minor, summed (exact for 1 ccy)
+    total_net = sum(net_by_ccy.values())
+    compression_pct = round(100 * (1 - total_net / total_gross)) if total_gross else 0
+
+    g_counts, n_counts = netting.compression(invoices, positions)
+    gross_payments = sum(g_counts.values())         # accepted nettable obligations
+    net_payments = sum(n_counts.values())           # party-currencies with non-zero net
+
+    fees_avoided = max(0, gross_payments - net_payments) * wire_fee_minor
+    fx_avoided = int(round(cross_value * fx_rate))
+    savings = fees_avoided + fx_avoided
+
+    # Per-party: invoices (with refs), gross AR/AP, net positions, payments, savings.
+    by_party = {}   # party_id -> list of (role, ci)
+    for ci in invoices:
+        by_party.setdefault(ci["biller_id"], []).append(("AR", ci))
+        by_party.setdefault(ci["payer_id"], []).append(("AP", ci))
+    pos_by_party = {}
+    for s in positions:
+        pos_by_party.setdefault(s["party_id"], []).append(s)
+
+    parties_out = []
+    for pid in sorted(set(by_party) | set(pos_by_party)):
+        entries = by_party.get(pid, [])
+        invoice_list, gross_ar, gross_ap, party_cross = [], {}, {}, 0
+        for role, ci in entries:
+            exp = refdata.exponent(conn, ci["currency"])
+            other = ci["payer_id"] if role == "AR" else ci["biller_id"]
+            invoice_list.append({
+                "ref": refs.get(ci["canonical_invoice_id"]),
+                "counterparty": names[other]["legal_name"] if other in names else None,
+                "direction": role, "currency": ci["currency"],
+                "amount_major": refdata.to_major(ci["gross_amount_minor"], exp),
+            })
+            bucket = gross_ar if role == "AR" else gross_ap
+            bucket[ci["currency"]] = bucket.get(ci["currency"], 0) + ci["gross_amount_minor"]
+            if ci["currency"] != primary:
+                party_cross += ci["gross_amount_minor"]
+
+        positions_out = []
+        for s in pos_by_party.get(pid, []):
+            exp = refdata.exponent(conn, s["currency"])
+            positions_out.append({
+                "currency": s["currency"], "net_minor": s["net"],
+                "net_major": refdata.to_major(s["net"], exp),
+                "direction": "receive" if s["net"] > 0 else ("pay" if s["net"] < 0 else "flat"),
+            })
+
+        obl_count = len(entries)                    # their nettable obligation count
+        fee_saved = max(0, obl_count - 1) * wire_fee_minor
+        party_fx = int(round(party_cross * fx_rate))
+        parties_out.append({
+            "party_id": pid,
+            "legal_name": names[pid]["legal_name"] if pid in names else None,
+            "tax_id": names[pid]["tax_id"] if pid in names else None,
+            "invoices_netted": obl_count,
+            "invoice_list": invoice_list,
+            "gross_ar": _money_list(conn, gross_ar),
+            "gross_ap": _money_list(conn, gross_ap),
+            "positions": positions_out,
+            "gross_payments": obl_count, "net_payments": 1 if obl_count else 0,
+            "money_saved_minor": fee_saved + party_fx,
+            "money_saved_major": refdata.to_major(fee_saved + party_fx, 2),
+        })
+
+    closed = conn.execute(
+        "SELECT timestamp FROM audit_log WHERE entity_ref = ? "
+        "AND action IN ('cycle_netted','cycle_close') ORDER BY log_id DESC LIMIT 1",
+        (f"cycle:{cycle['cycle_id']}",)).fetchone()
+
+    return {
+        "cycle_id": cycle["cycle_id"], "label": (cycle["opens_at"] or "")[:7],
+        "sequence_no": cycle["sequence_no"], "state": cycle["state"],
+        "provisional": result["provisional"],
+        "closed_at": closed["timestamp"] if closed else None,
+        "settlement_date": cycle["settlement_date"],
+        "assumptions": {
+            "wire_fee_minor": wire_fee_minor,
+            "wire_fee_major": refdata.to_major(wire_fee_minor, 2),
+            "fx_rate": fx_rate, "fx_rate_pct": round(fx_rate * 100, 3),
+        },
+        "network": {
+            "parties_in_net": len(parties_out),
+            "invoices_netted": len(invoices),
+            "gross_settled": _money_list(conn, gross_by_ccy),
+            "net_to_settle": _money_list(conn, net_by_ccy),
+            "compression_pct": compression_pct,
+            "gross_payments": gross_payments, "net_payments": net_payments,
+            "fees_avoided_minor": fees_avoided,
+            "fx_avoided_minor": fx_avoided,
+            "savings_minor": savings,
+            "savings_major": refdata.to_major(savings, 2),
+        },
+        "parties": parties_out,
+    }
+
+
+@app.get("/statement/summary")
+def statement_summary(cycle_id: int = None, network_id: int = 1,
+                      wire_fee: float = WIRE_FEE_MAJOR_DEFAULT,
+                      fx_rate: float = FX_RATE_DEFAULT):
+    """Presentation-grade cycle statement: network headline + per-party detail.
+    Savings assumptions (wire_fee €, fx_rate) are adjustable and echoed back."""
+    conn = get_conn()
+    try:
+        _require_audit_ok(conn)
+        cycle = _active_cycle(conn, network_id, cycle_id)
+        if cycle is None:
+            raise HTTPException(404, "No cycle.")
+        try:
+            return _statement_summary(conn, cycle, int(round(wire_fee * 100)), fx_rate)
+        except netting.NettingInvariantError as e:
+            raise HTTPException(409, f"Netting invariant failed — statement blocked: {e}")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Demo controls (Phase B) — DEMO ONLY. Browser-driven cycle advance + reset so a
 # live demo needs no CLI. These force the EXISTING state machine / row ops on
 # demand; they are never normal user actions and must stay behind the Demo area.
