@@ -1,0 +1,7 @@
+Doc No,Trading Partner,Gross Amount,Ccy,Invoice Date,Maturity,Ledger Type,Doc Status,PO Ref
+INV-9001,Skyline Freight GmbH,"12,500.00",EUR,2026-06-09,2026-06-30,Sales,Open,PO-5521
+INV-9002,Meridian Cargo SARL,"8,420.50",EUR,06/10/2026,06/28/2026,Purchase,Open,
+INV-9003,Pacific Forwarders Ltd,"4,100.00",USD,2026-06-11,2026-07-02,Sales,Open,PO-5530
+INV-9004,Helvetia Air AG,"3,250.00",CHF,2026-06-12,2026-06-29,Purchase,Partial,
+INV-9005,Anatolia Logistics A.S.,"15,900.00",EUR,2026-06-12,2026-08-15,Sales,Open,PO-5544
+INV-9006,Baltic Freight OU,"2,200.00",,2026-06-13,2026-06-27,,Open,

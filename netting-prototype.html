@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Netting — prototype</title>
+<style>
+  :root{
+    --ink:#16212b; --ink-soft:#42525c; --muted:#7d8a91;
+    --paper:#ecefea; --surface:#ffffff;
+    --line:#d9ded8; --line-soft:#e9ece7;
+    --net:#0c6b63; --net-soft:#e1efed; --net-line:#bfdedb;
+    --reveal:#a9640f; --reveal-soft:#f6ecda; --reveal-line:#e6cfa4;
+    --dispute:#a23a31; --dispute-soft:#f4e4e1;
+    --defer:#7a6326; --defer-soft:#efe9d8;
+    --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;}
+  body{
+    font-family:var(--sans); color:var(--ink); background:var(--paper);
+    font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
+    display:flex; min-height:100%;
+  }
+  .num{font-family:var(--mono); font-variant-numeric:tabular-nums; letter-spacing:-0.01em;}
+
+  /* ---------- sidebar ---------- */
+  .side{
+    width:228px; flex:0 0 228px; background:var(--ink); color:#cdd6da;
+    display:flex; flex-direction:column; position:sticky; top:0; height:100vh;
+  }
+  .brand{padding:22px 22px 18px; border-bottom:1px solid rgba(255,255,255,.08);}
+  .brand .mark{font-family:var(--mono); font-size:12px; letter-spacing:.22em; color:#fff; text-transform:uppercase;}
+  .brand .sub{font-size:11px; color:#7f8e96; margin-top:6px; letter-spacing:.02em;}
+  nav{padding:14px 12px; display:flex; flex-direction:column; gap:2px;}
+  .nav-eyebrow{font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:#65757d; padding:10px 12px 6px;}
+  .nav-item{
+    display:flex; align-items:center; gap:11px; padding:9px 12px; border-radius:7px;
+    color:#b6c2c8; cursor:pointer; font-size:13.5px; border:1px solid transparent;
+  }
+  .nav-item:hover{background:rgba(255,255,255,.05); color:#eaf0f2;}
+  .nav-item.active{background:rgba(255,255,255,.07); color:#fff; border-color:rgba(255,255,255,.07);}
+  .nav-item .dot{width:7px;height:7px;border-radius:2px;background:#3f5159;flex:0 0 auto;}
+  .nav-item.active .dot{background:var(--net);box-shadow:0 0 0 3px rgba(12,107,99,.25);}
+  .side-foot{margin-top:auto; padding:16px 22px; border-top:1px solid rgba(255,255,255,.08); font-size:11px; color:#65757d;}
+  .side-foot b{color:#9fb0b6; font-weight:600;}
+
+  /* ---------- main ---------- */
+  main{flex:1; min-width:0; display:flex; flex-direction:column;}
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+    padding:16px 30px; background:rgba(255,255,255,.7); backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5;
+  }
+  .topbar .who{font-size:13px; color:var(--ink-soft);}
+  .topbar .who b{color:var(--ink);}
+  .cyc-chip{
+    display:inline-flex; align-items:center; gap:9px; font-size:12px; color:var(--ink-soft);
+    background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:6px 13px;
+  }
+  .cyc-chip .num{color:var(--ink); font-weight:600;}
+  .cyc-chip .pip{width:6px;height:6px;border-radius:50%;background:var(--net);}
+  .view{padding:28px 30px 60px; max-width:1080px;}
+  .view h1{font-size:20px; margin:0 0 3px; letter-spacing:-.01em;}
+  .view .lede{color:var(--muted); font-size:13px; margin:0 0 22px;}
+  .hidden{display:none !important;}
+
+  /* metric strip */
+  .metrics{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:22px;}
+  .metric{background:var(--surface); border:1px solid var(--line); border-radius:11px; padding:14px 16px;}
+  .metric .k{font-size:11px; letter-spacing:.04em; text-transform:uppercase; color:var(--muted);}
+  .metric .v{font-family:var(--mono); font-size:22px; margin-top:7px; letter-spacing:-.02em;}
+  .metric .v small{font-size:12px; color:var(--muted);}
+  .metric.warn .v{color:var(--reveal);}
+
+  /* filters */
+  .toolbar{display:flex; align-items:center; gap:8px; margin-bottom:12px;}
+  .seg{display:inline-flex; background:var(--surface); border:1px solid var(--line); border-radius:9px; padding:3px;}
+  .seg button{border:0; background:transparent; padding:6px 13px; border-radius:6px; font:inherit; font-size:12.5px; color:var(--ink-soft); cursor:pointer;}
+  .seg button.on{background:var(--ink); color:#fff;}
+  .toolbar .spacer{flex:1;}
+  .hint{font-size:12px; color:var(--muted);}
+
+  /* table */
+  .card{background:var(--surface); border:1px solid var(--line); border-radius:13px; overflow:hidden;}
+  table{width:100%; border-collapse:collapse;}
+  thead th{
+    font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted);
+    text-align:left; padding:11px 16px; border-bottom:1px solid var(--line); font-weight:600; white-space:nowrap;
+  }
+  thead th.r, td.r{text-align:right;}
+  tbody td{padding:13px 16px; border-bottom:1px solid var(--line-soft); vertical-align:middle;}
+  tbody tr:last-child td{border-bottom:0;}
+  tbody tr.flagged{background:#fbf6ef;}
+  .cp{font-weight:600;}
+  .cp .meta{display:block; font-size:11px; color:var(--muted); font-weight:400; margin-top:2px;}
+  .dir{font-family:var(--mono); font-size:11px; padding:2px 7px; border-radius:5px; border:1px solid var(--line);}
+  .dir.ar{color:var(--net); background:var(--net-soft); border-color:var(--net-line);}
+  .dir.ap{color:var(--ink-soft); background:#f2f4f1;}
+  td.amt{font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right; white-space:nowrap;}
+  .badge{display:inline-flex; align-items:center; gap:6px; font-size:11.5px; padding:3px 9px; border-radius:999px; border:1px solid var(--line); color:var(--ink-soft); white-space:nowrap;}
+  .badge .b-dot{width:6px;height:6px;border-radius:50%; background:var(--muted);}
+  .badge.ok{color:var(--net); border-color:var(--net-line); background:var(--net-soft);} .badge.ok .b-dot{background:var(--net);}
+  .badge.mismatch{color:var(--reveal); border-color:var(--reveal-line); background:var(--reveal-soft);} .badge.mismatch .b-dot{background:var(--reveal);}
+  .badge.one{color:var(--ink-soft); background:#f2f4f1;} .badge.one .b-dot{background:#aab6ad;}
+
+  /* disposition control */
+  .disp{display:inline-flex; gap:4px; flex-wrap:wrap;}
+  .disp button{
+    font:inherit; font-size:11.5px; padding:5px 9px; border-radius:7px; cursor:pointer;
+    border:1px solid var(--line); background:var(--surface); color:var(--ink-soft); white-space:nowrap; position:relative;
+  }
+  .disp button:hover:not(:disabled){border-color:#c3ccc4;}
+  .disp button:disabled{opacity:.38; cursor:not-allowed;}
+  .disp button.sel[data-d="net"]{background:var(--net); border-color:var(--net); color:#fff;}
+  .disp button.sel[data-d="direct"]{background:#33424b; border-color:#33424b; color:#fff;}
+  .disp button.sel[data-d="defer"]{background:var(--defer); border-color:var(--defer); color:#fff;}
+  .disp button.sel[data-d="dispute"]{background:var(--dispute); border-color:var(--dispute); color:#fff;}
+  .sugg{display:block; font-size:10px; color:var(--muted); margin-top:5px;}
+  .sugg b{color:var(--ink-soft); font-weight:600;}
+
+  /* sticky cycle tally */
+  .tally{
+    position:sticky; bottom:0; margin-top:14px; background:var(--ink); color:#dfe7ea;
+    border-radius:12px; padding:13px 18px; display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  }
+  .tally .lbl{font-size:11px; letter-spacing:.04em; text-transform:uppercase; color:#89989f;}
+  .tally .big{font-family:var(--mono); font-size:16px; color:#fff;}
+  .tally .sep{width:1px; height:22px; background:rgba(255,255,255,.14);}
+  .tally .net-amt{color:#7fd8cf;}
+
+  /* ---------- netting reveal ---------- */
+  .cyc-head{display:flex; align-items:flex-end; justify-content:space-between; gap:20px; margin-bottom:18px;}
+  .progress-wrap{margin:18px 0 26px;}
+  .progress-meta{display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:8px;}
+  .progress-meta b{color:var(--ink);}
+  .track{height:9px; background:#dfe4de; border-radius:999px; overflow:hidden;}
+  .fill{height:100%; width:62%; background:linear-gradient(90deg,var(--net),#13877d); border-radius:999px;}
+  .pos-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:26px;}
+  .pos{background:var(--surface); border:1px solid var(--line); border-radius:11px; padding:15px 16px;}
+  .pos .k{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em;}
+  .pos .v{font-family:var(--mono); font-size:21px; margin-top:7px;}
+  .pos .v.pay{color:var(--dispute);} .pos .v.recv{color:var(--net);}
+  .pos .x{font-size:11px; color:var(--muted); margin-top:3px;}
+
+  .reveal{
+    background:linear-gradient(180deg,#fffaf2, #fdf6ea); border:1px solid var(--reveal-line);
+    border-radius:16px; padding:24px 26px; margin-bottom:14px;
+  }
+  .reveal .tag{font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--reveal); font-weight:700;}
+  .collapse{display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:22px; margin:18px 0 6px;}
+  .cstat .big{font-family:var(--mono); font-size:40px; line-height:1; letter-spacing:-.03em;}
+  .cstat .big.after{color:var(--reveal);}
+  .cstat .lab{font-size:12px; color:var(--ink-soft); margin-top:8px;}
+  .cstat .lab b{font-weight:600;}
+  .bars{display:flex; align-items:flex-end; gap:3px; height:54px; margin-top:14px;}
+  .bars.before span{width:5px; background:#cdb98f; border-radius:2px 2px 0 0; opacity:.8;}
+  .bars.after span{width:13px; background:var(--reveal); border-radius:2px 2px 0 0;}
+  .arrow{font-family:var(--mono); color:var(--reveal); font-size:22px; text-align:center;}
+  .arrow small{display:block; font-size:10px; color:var(--muted); letter-spacing:.08em; margin-top:6px; font-family:var(--sans);}
+  .eliminated{
+    display:flex; align-items:baseline; gap:12px; margin-top:14px; padding-top:16px; border-top:1px dashed var(--reveal-line);
+  }
+  .eliminated .pct{font-family:var(--mono); font-size:30px; color:var(--reveal); letter-spacing:-.02em;}
+  .eliminated .txt{font-size:13px; color:var(--ink-soft);}
+
+  .savings{display:grid; grid-template-columns:1.3fr 1fr; gap:14px; margin-top:14px;}
+  .save-card{background:var(--surface); border:1px solid var(--line); border-radius:13px; padding:18px 20px;}
+  .save-card.agg{background:var(--ink); color:#dfe7ea; border-color:var(--ink);}
+  .save-card .k{font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);}
+  .save-card.agg .k{color:#8a989f;}
+  .save-card .v{font-family:var(--mono); font-size:30px; margin-top:8px; letter-spacing:-.02em;}
+  .save-card.agg .v{color:#fff;}
+  .save-card .v .yr{font-size:13px; color:var(--muted);}
+  .assume{display:flex; align-items:center; gap:8px; margin-top:14px; font-size:12px; color:var(--ink-soft); flex-wrap:wrap;}
+  .assume input{font-family:var(--mono); width:62px; padding:5px 8px; border:1px solid var(--line); border-radius:7px; font-size:13px; text-align:right;}
+  .assume .calc{color:var(--muted); font-family:var(--mono); font-size:11.5px;}
+  .save-card.agg .sub{font-size:11.5px; color:#8a989f; margin-top:8px;}
+  .save-card.agg .sub b{color:#7fd8cf; font-weight:600;}
+
+  /* ---------- partners ---------- */
+  .pbadge{font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line);}
+  .pbadge.on{color:var(--net); background:var(--net-soft); border-color:var(--net-line);}
+  .pbadge.off{color:var(--muted); background:#f2f4f1;}
+  .baltype{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em;}
+
+  /* ---------- upload ---------- */
+  .drop{
+    border:1.5px dashed #c3ccc4; border-radius:14px; background:var(--surface);
+    padding:38px; text-align:center; color:var(--muted); margin-bottom:22px;
+  }
+  .drop .ic{font-family:var(--mono); font-size:13px; color:var(--ink-soft); letter-spacing:.08em;}
+  .drop .big{font-size:15px; color:var(--ink); margin:10px 0 4px;}
+  .drop button{margin-top:14px; font:inherit; font-size:13px; padding:9px 18px; border-radius:9px; border:0; background:var(--ink); color:#fff; cursor:pointer;}
+  .sumbar{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:18px;}
+  .sumbar .metric .v.ok{color:var(--net);}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:13px; padding:18px 20px; margin-bottom:14px;}
+  .panel h3{margin:0 0 4px; font-size:14px;}
+  .panel p{margin:0 0 14px; color:var(--muted); font-size:12.5px;}
+  .map-row{display:flex; align-items:center; gap:10px; font-size:13px; padding:7px 0; border-bottom:1px solid var(--line-soft);}
+  .map-row:last-child{border-bottom:0;}
+  .map-row .src{font-family:var(--mono); color:var(--ink-soft); width:150px;}
+  .map-row .arr{color:var(--muted);}
+  .map-row .dst{font-family:var(--mono); color:var(--net);}
+  .resolve{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; background:#fbf6ef; border:1px solid var(--reveal-line); border-radius:10px;}
+  .resolve .q{font-size:13px;} .resolve .q b{font-family:var(--mono);}
+  .resolve .acts{display:flex; gap:6px;}
+  .btn-sm{font:inherit; font-size:12px; padding:6px 12px; border-radius:7px; border:1px solid var(--line); background:var(--surface); cursor:pointer;}
+  .btn-sm.primary{background:var(--net); border-color:var(--net); color:#fff;}
+  .panel .confirm{font:inherit; font-size:13px; padding:10px 18px; border-radius:9px; border:0; background:var(--net); color:#fff; cursor:pointer; margin-top:6px;}
+
+  @media (max-width:880px){
+    .side{display:none;} .metrics,.sumbar{grid-template-columns:repeat(2,1fr);}
+    .pos-grid,.savings,.collapse{grid-template-columns:1fr;} .collapse .arrow{transform:rotate(90deg);}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
+</style>
+</head>
+<body>
+  <aside class="side">
+    <div class="brand">
+      <div class="mark">⬡ Nettvia</div>
+      <div class="sub">NAP clearing network · pilot</div>
+    </div>
+    <nav>
+      <div class="nav-eyebrow">Workspace</div>
+      <div class="nav-item" data-view="partners"><span class="dot"></span>Partners</div>
+      <div class="nav-item" data-view="upload"><span class="dot"></span>Upload accounts</div>
+      <div class="nav-item active" data-view="accounts"><span class="dot"></span>Accounts</div>
+      <div class="nav-item" data-view="netting"><span class="dot"></span>Netting</div>
+    </nav>
+    <div class="side-foot">Signed in as<br><b>Aegean Air Cargo S.A.</b><br>Athens · GR</div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div class="who">Reconciliation &amp; netting · <b>Aegean Air Cargo S.A.</b></div>
+      <div class="cyc-chip"><span class="pip"></span>Cycle <span class="num">2026-06</span> · closes in <span class="num">11d</span></div>
+    </div>
+
+    <!-- ============ ACCOUNTS ============ -->
+    <section class="view" id="view-accounts">
+      <h1>Accounts</h1>
+      <p class="lede">Your AP/AR for the open cycle. Decide what each invoice does — net it, settle it directly, defer it, or dispute it.</p>
+
+      <div class="metrics">
+        <div class="metric"><div class="k">Gross receivable</div><div class="v">€33,650 <small>+ $9,800</small></div></div>
+        <div class="metric"><div class="k">Gross payable</div><div class="v">€29,350 <small>+ $4,100</small></div></div>
+        <div class="metric"><div class="k">Pending</div><div class="v">9 <small>invoices</small></div></div>
+        <div class="metric warn"><div class="k">Needs attention</div><div class="v">2</div></div>
+      </div>
+
+      <div class="toolbar">
+        <div class="seg">
+          <button class="on" data-filter="all">All invoices</button>
+          <button data-filter="attention">Needs attention</button>
+        </div>
+        <div class="spacer"></div>
+        <div class="hint">Suggested action is pre-selected from the due date — override any row.</div>
+      </div>
+
+      <div class="card">
+        <table>
+          <thead><tr>
+            <th>Issued</th><th>Due</th><th>Counterparty</th><th>Dir</th><th class="r">Amount</th><th>Match</th><th>Disposition</th>
+          </tr></thead>
+          <tbody id="acct-body"></tbody>
+        </table>
+      </div>
+
+      <div class="tally">
+        <span class="lbl">Accepted to net this cycle</span>
+        <span class="big" id="tally-count">0 invoices</span>
+        <span class="sep"></span>
+        <span class="lbl">Your net position so far</span>
+        <span class="big net-amt" id="tally-net">€0</span>
+      </div>
+    </section>
+
+    <!-- ============ NETTING ============ -->
+    <section class="view hidden" id="view-netting">
+      <div class="cyc-head">
+        <div><h1>Netting</h1><p class="lede" style="margin-bottom:0">Cycle 2026-06 · projected settlement 30 Jun 2026</p></div>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress-meta"><span>Opened <b>01 Jun</b></span><span>Cut-off <b>27 Jun</b> · settle <b>30 Jun</b></span></div>
+        <div class="track"><div class="fill"></div></div>
+      </div>
+
+      <div class="pos-grid">
+        <div class="pos"><div class="k">Net — EUR</div><div class="v pay">−€12,800</div><div class="x">you pay · provisional</div></div>
+        <div class="pos"><div class="k">Net — USD</div><div class="v recv">+$5,700</div><div class="x">you receive · provisional</div></div>
+        <div class="pos"><div class="k">Settles in</div><div class="v">16 days</div><div class="x">projected · no funds moved</div></div>
+      </div>
+
+      <div class="reveal">
+        <span class="tag">The reveal · your cycle</span>
+        <div class="collapse">
+          <div class="cstat">
+            <div class="big">9</div>
+            <div class="lab"><b>gross invoices</b> across 5 counterparties</div>
+            <div class="bars before" id="bars-before"></div>
+          </div>
+          <div class="arrow">→<small>NETTED</small></div>
+          <div class="cstat">
+            <div class="big after">3</div>
+            <div class="lab"><b>net payments</b> to settle</div>
+            <div class="bars after" id="bars-after"></div>
+          </div>
+        </div>
+        <div class="eliminated">
+          <span class="pct">67%</span>
+          <span class="txt"><b>6 payments eliminated</b> this cycle — fewer wires, fewer reconciliations, fewer FX legs.</span>
+        </div>
+
+        <div class="savings">
+          <div class="save-card">
+            <div class="k">Estimated saving · this cycle</div>
+            <div class="v" id="save-cycle">€210</div>
+            <div class="assume">
+              <span>Cost per payment</span>
+              <span>€</span><input id="cpp" type="number" value="35" min="0" step="5">
+              <span class="calc" id="save-calc">6 avoided × €35</span>
+            </div>
+          </div>
+          <div class="save-card agg">
+            <div class="k">Across NAP · this cycle</div>
+            <div class="v" id="save-agg">€43,120 <span class="yr">/cycle</span></div>
+            <div class="sub"><b id="agg-elim">1,232 payments</b> eliminated network-wide · ≈ <b id="agg-year">€517k</b> a year</div>
+          </div>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:14px">Payment-fee saving only. FX-spread and working-capital savings are larger, separate levers — added later.</p>
+    </section>
+
+    <!-- ============ PARTNERS ============ -->
+    <section class="view hidden" id="view-partners">
+      <h1>Partners</h1>
+      <p class="lede">Your trading counterparties. On-network partners can net with you; off-network ones can only be reconciled.</p>
+      <div class="card">
+        <table>
+          <thead><tr>
+            <th>Partner</th><th>Status</th><th class="r">Balance</th><th>Basis</th><th class="r">Invoices (cycle)</th>
+          </tr></thead>
+          <tbody>
+            <tr><td class="cp">Skyline Freight GmbH<span class="meta">Frankfurt · DE</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">+€6,150</td><td><span class="baltype">Agreed</span></td><td class="amt">4</td></tr>
+            <tr><td class="cp">Pacific Forwarders Ltd<span class="meta">Singapore · SG</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">+$5,700</td><td><span class="baltype">Agreed</span></td><td class="amt">2</td></tr>
+            <tr><td class="cp">Levant Cargo Co<span class="meta">Beirut · LB</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">−€7,650</td><td><span class="baltype">Agreed</span></td><td class="amt">1</td></tr>
+            <tr><td class="cp">Helvetia Air AG<span class="meta">Zürich · CH</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">+CHF 6,400</td><td><span class="baltype">Agreed</span></td><td class="amt">1</td></tr>
+            <tr><td class="cp">Nile Logistics<span class="meta">Cairo · EG</span></td><td><span class="pbadge off">Off-network</span></td><td class="amt">+€5,200</td><td><span class="baltype">Claimed</span></td><td class="amt">1</td></tr>
+            <tr><td class="cp">Adriatic Shipping<span class="meta">Rijeka · HR</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">−€3,300</td><td><span class="baltype">Disputed</span></td><td class="amt">1</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin-top:14px">Balances are per-currency — no FX consolidation. “Agreed” means both ledgers matched; “Claimed” is your books only.</p>
+    </section>
+
+    <!-- ============ UPLOAD ============ -->
+    <section class="view hidden" id="view-upload">
+      <h1>Upload accounts</h1>
+      <p class="lede">Drop your AP/AR export. We read it, match it against the network, and flag only what needs you.</p>
+
+      <div class="drop">
+        <div class="ic">CSV · XLSX</div>
+        <div class="big">Drop your AP/AR export here</div>
+        <div>or browse — we’ll map the columns for you</div>
+        <button onclick="document.getElementById('upload-result').classList.remove('hidden')">Use sample file</button>
+      </div>
+
+      <div id="upload-result" class="hidden">
+        <div class="sumbar">
+          <div class="metric"><div class="k">Rows read</div><div class="v">312</div></div>
+          <div class="metric"><div class="k">Auto-processed</div><div class="v ok">294</div></div>
+          <div class="metric warn"><div class="k">Need attention</div><div class="v">18</div></div>
+        </div>
+
+        <div class="panel">
+          <h3>We mapped your columns like this</h3>
+          <p>From <b>cargowise_AR_export.xlsx</b> — confirm once and we’ll remember this format.</p>
+          <div class="map-row"><span class="src">Doc Number</span><span class="arr">→</span><span class="dst">invoice_number</span></div>
+          <div class="map-row"><span class="src">Trading Partner</span><span class="arr">→</span><span class="dst">counterparty</span></div>
+          <div class="map-row"><span class="src">Gross (CCY)</span><span class="arr">→</span><span class="dst">amount + currency</span></div>
+          <div class="map-row"><span class="src">Maturity</span><span class="arr">→</span><span class="dst">due_date</span></div>
+        </div>
+
+        <div class="panel">
+          <h3>One new counterparty to confirm</h3>
+          <p>We couldn’t auto-match this name. Is it an existing partner?</p>
+          <div class="resolve">
+            <div class="q">“<b>PACIFIC FWDRS PTE</b>” &nbsp;→&nbsp; likely <b>Pacific Forwarders Ltd</b> &nbsp;<span class="hint">(same tax ID)</span></div>
+            <div class="acts"><button class="btn-sm primary">Confirm match</button><button class="btn-sm">It’s new</button></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Ready to import</h3>
+          <p>294 invoices will land in Accounts. The 18 flagged rows (16 mismatches, 2 unmatched) are tagged “needs attention” for you to handle there.</p>
+          <button class="confirm" onclick="go('accounts')">Confirm &amp; import →</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+<script>
+/* ---------- mock obligations (messy on purpose) ---------- */
+const sym = {EUR:'€', USD:'$', CHF:'CHF '};
+const fmt = (n,c)=> (n<0?'−':'') + sym[c] + Math.abs(n).toLocaleString('en-US');
+const rows = [
+  {cp:'Skyline Freight GmbH', on:true, dir:'AP', amt:18400, c:'EUR', iss:'02 Jun', due:'24 Jun', match:'matched', sugg:'net'},
+  {cp:'Skyline Freight GmbH', on:true, dir:'AR', amt:12250, c:'EUR', iss:'04 Jun', due:'24 Jun', match:'matched', sugg:'net'},
+  {cp:'Pacific Forwarders Ltd', on:true, dir:'AR', amt:9800, c:'USD', iss:'03 Jun', due:'26 Jun', match:'matched', sugg:'net'},
+  {cp:'Pacific Forwarders Ltd', on:true, dir:'AP', amt:4100, c:'USD', iss:'05 Jun', due:'26 Jun', match:'mismatch', sugg:'dispute', note:'their books: $3,900'},
+  {cp:'Helvetia Air AG', on:true, dir:'AR', amt:6400, c:'CHF', iss:'06 Jun', due:'25 Jun', match:'matched', sugg:'net'},
+  {cp:'Levant Cargo Co', on:true, dir:'AP', amt:7650, c:'EUR', iss:'01 Jun', due:'27 Aug', match:'matched', sugg:'defer', note:'net-90'},
+  {cp:'Nile Logistics', on:false, dir:'AR', amt:5200, c:'EUR', iss:'28 May', due:'21 Jun', match:'unmatched', sugg:'direct', note:'off-network'},
+  {cp:'Adriatic Shipping', on:true, dir:'AP', amt:3300, c:'EUR', iss:'30 May', due:'23 Jun', match:'matched', sugg:'dispute', note:'service in dispute'},
+  {cp:'Skyline Freight GmbH', on:true, dir:'AP', amt:7600, c:'EUR', iss:'07 Jun', due:'28 Jun', match:'matched', sugg:'net'},
+];
+
+const DISP = [
+  {d:'net', label:'Accept &amp; net'},
+  {d:'direct', label:'Settle direct'},
+  {d:'defer', label:'Defer'},
+  {d:'dispute', label:'Dispute'},
+];
+const matchBadge = {
+  matched:'<span class="badge ok"><span class="b-dot"></span>Matched</span>',
+  mismatch:'<span class="badge mismatch"><span class="b-dot"></span>Mismatch</span>',
+  unmatched:'<span class="badge one"><span class="b-dot"></span>One-sided</span>',
+};
+
+function render(){
+  const filter = document.querySelector('[data-filter].on').dataset.filter;
+  const body = document.getElementById('acct-body');
+  body.innerHTML = '';
+  rows.forEach((r,i)=>{
+    const attention = r.match!=='matched';
+    if(filter==='attention' && !attention) return;
+    if(r.disp===undefined) r.disp = r.sugg;           // pre-select suggestion
+    const canNet = r.match==='matched';                // match status gates "accept & net"
+    const tr = document.createElement('tr');
+    if(attention) tr.className='flagged';
+    const btns = DISP.map(o=>{
+      const dis = (o.d==='net' && !canNet) ? 'disabled title="Resolve the match before netting"' : '';
+      const sel = r.disp===o.d ? 'sel' : '';
+      return `<button class="${sel}" data-d="${o.d}" ${dis} onclick="setDisp(${i},'${o.d}')">${o.label}</button>`;
+    }).join('');
+    tr.innerHTML = `
+      <td class="num" style="color:var(--muted)">${r.iss}</td>
+      <td class="num">${r.due}</td>
+      <td class="cp">${r.cp}${r.note?`<span class="meta">${r.note}</span>`:''}</td>
+      <td><span class="dir ${r.dir.toLowerCase()}">${r.dir}</span></td>
+      <td class="amt">${fmt(r.amt, r.c)}</td>
+      <td>${matchBadge[r.match]}</td>
+      <td><div class="disp">${btns}</div><span class="sugg">Suggested: <b>${labelFor(r.sugg)}</b></span></td>`;
+    body.appendChild(tr);
+  });
+  updateTally();
+}
+function labelFor(d){return ({net:'Accept & net',direct:'Settle direct',defer:'Defer',dispute:'Dispute'})[d];}
+function setDisp(i,d){ if(d==='net' && rows[i].match!=='matched') return; rows[i].disp=d; render(); }
+
+function updateTally(){
+  const netted = rows.filter(r=>r.disp==='net');
+  const byCcy = {};
+  netted.forEach(r=>{ const s=(r.dir==='AR'?1:-1)*r.amt; byCcy[r.c]=(byCcy[r.c]||0)+s; });
+  document.getElementById('tally-count').textContent = `${netted.length} invoice${netted.length===1?'':'s'}`;
+  const parts = Object.keys(byCcy).length ? Object.entries(byCcy).map(([c,v])=>fmt(v,c)).join('  ·  ') : '€0';
+  document.getElementById('tally-net').textContent = parts;
+}
+
+/* ---------- netting reveal ---------- */
+function bars(el,n,cls){ el.innerHTML=''; for(let i=0;i<n;i++){const s=document.createElement('span'); s.style.height=(cls==='before'?(18+Math.random()*34):(34+Math.random()*18))+'px'; el.appendChild(s);} }
+bars(document.getElementById('bars-before'),9,'before');
+bars(document.getElementById('bars-after'),3,'after');
+
+function recalcSavings(){
+  const cpp = Math.max(0, +document.getElementById('cpp').value || 0);
+  const eliminated = 6, aggElim = 1232;
+  document.getElementById('save-cycle').textContent = '€'+(eliminated*cpp).toLocaleString('en-US');
+  document.getElementById('save-calc').textContent = `${eliminated} avoided × €${cpp}`;
+  document.getElementById('save-agg').innerHTML = '€'+(aggElim*cpp).toLocaleString('en-US')+' <span class="yr">/cycle</span>';
+  document.getElementById('agg-elim').textContent = aggElim.toLocaleString('en-US')+' payments';
+  document.getElementById('agg-year').textContent = '€'+Math.round(aggElim*cpp*12/1000)+'k';
+}
+document.getElementById('cpp').addEventListener('input', recalcSavings);
+
+/* ---------- nav ---------- */
+function go(v){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===v));
+  document.querySelectorAll('.view').forEach(s=>s.classList.add('hidden'));
+  document.getElementById('view-'+v).classList.remove('hidden');
+  window.scrollTo({top:0});
+}
+document.querySelectorAll('.nav-item').forEach(n=> n.addEventListener('click',()=>go(n.dataset.view)));
+document.querySelectorAll('[data-filter]').forEach(b=> b.addEventListener('click',()=>{
+  document.querySelectorAll('[data-filter]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); render();
+}));
+
+render(); recalcSavings();
+</script>
+</body>
+</html>
