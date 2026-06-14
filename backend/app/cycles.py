@@ -212,17 +212,20 @@ def lock(conn, cycle_id):
                 continue
 
         _, nettable = pair_state(conn, o, match, code, horizon)
-        if code == "net" and nettable:         # both sides accept & net, confirmed
+        if code == "net" and nettable:         # both sides accept & net, confirmed → freeze
             conn.execute(
                 "INSERT INTO cycle_obligations (cycle_id, obligation_id, frozen_amount, "
                 "frozen_currency) VALUES (?,?,?,?)",
                 (cycle_id, o["obligation_id"], o["amount"], o["currency"]))
             frozen += 1
-        elif code == "defer" or code == "net":  # defer, or net-but-not-nettable → roll
+        elif code in ("defer", "dispute"):     # long-dated / contested → roll forward
             conn.execute(
                 "UPDATE obligations SET assigned_cycle_id = ? WHERE obligation_id = ?",
                 (nxt["cycle_id"], o["obligation_id"]))
-        # 'direct' / 'dispute' → remain in this cycle, agreed-not-netted / contested
+        # 'net' (accepted to net — frozen above when nettable; otherwise the party
+        # acted on it this cycle, so it stays in the CLOSING cycle and does NOT
+        # roll) and 'direct' (settled outside netting) both remain here. Net is
+        # never rolled, so accept & net always clears the open Accounts view.
 
     conn.execute("UPDATE cycles SET state = 'locked' WHERE cycle_id = ?", (cycle_id,))
     audit.append(conn, actor="operator", action="cycle_lock",

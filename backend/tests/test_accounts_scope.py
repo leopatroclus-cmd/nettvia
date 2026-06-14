@@ -50,3 +50,65 @@ def test_advance_drops_netted_keeps_rolled(client, conn):
     assert got_ar == exp_ar
     # Nile AEG-2044 is a receivable awaiting disposition → counts as pending.
     assert m["pending"] >= 1
+
+
+def _accept_net_pair(conn, ref, biller, payer, amt, matched=True):
+    """Insert a two-sided accept&net EUR pair in the open cycle (cycle 1)."""
+    from app import canonical, matching
+    names = {r["party_id"]: r["legal_name"]
+             for r in conn.execute("SELECT party_id, legal_name FROM parties")}
+
+    def ins(owner, direction, cp):
+        conn.execute(
+            "INSERT INTO obligations (owner_party_id, direction, counterparty_raw, "
+            "counterparty_party_id, network_id, invoice_number, amount, currency, "
+            "issue_date, due_date, status_source, assigned_cycle_id, ingest_state, "
+            "disposition, settlement_mode) VALUES (?,?,?,?,1,?,?, 'EUR', '2026-06-05', "
+            "'2026-06-25', 'open', 1, 'ingested', 'accepted', 'net')",
+            (owner, direction, names[cp], cp, ref, amt * 100))
+
+    ins(biller, "AR", payer)
+    ins(payer, "AP", biller)
+    if matched:
+        matching.match_all(conn)
+        canonical.mint(conn)
+    conn.commit()
+
+
+def test_all_netted_open_view_empty_for_every_party(client, conn):
+    """ALL-NETTED case (no rolled items): after advance, every fully-netted
+    party's open Accounts view is empty — netted invoices live only in the
+    closed cycle's statement, none swept into the new open cycle."""
+    client.post("/demo/reset")
+    # A small fully-nettable ring: 1→2, 2→3, 3→1 (all matched, accept&net).
+    _accept_net_pair(conn, "R-1", 1, 2, 5000)
+    _accept_net_pair(conn, "R-2", 2, 3, 4000)
+    _accept_net_pair(conn, "R-3", 3, 1, 3000)
+
+    client.post("/demo/advance")
+
+    # Nothing rolled → every party's open view is empty.
+    for pid in (1, 2, 3):
+        client.post("/demo/session", json={"party_id": pid})
+        assert client.get("/obligations").json() == [], f"party {pid} open view not empty"
+        m = client.get("/accounts/metrics").json()
+        assert m["gross_receivable"] == [] and m["gross_payable"] == []
+
+    # All six obligations stayed frozen in the now-closed cycle 1.
+    assert conn.execute("SELECT COUNT(*) FROM cycle_obligations WHERE cycle_id=1").fetchone()[0] == 6
+    assert conn.execute(
+        "SELECT COUNT(*) FROM obligations WHERE assigned_cycle_id=1").fetchone()[0] == 6
+
+
+def test_accepted_net_but_unmatched_does_not_roll(client, conn):
+    """Accept&net on a pair that isn't a confirmed nettable match must NOT roll
+    into the new open cycle (the reported bug) — it stays in the closing cycle."""
+    client.post("/demo/reset")
+    _accept_net_pair(conn, "U-1", 1, 2, 7000, matched=False)   # accepted net, unmatched
+
+    client.post("/demo/advance")
+
+    assert client.get("/obligations").json() == []             # left the open view
+    open_id = conn.execute("SELECT cycle_id FROM cycles WHERE state='open'").fetchone()[0]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM obligations WHERE assigned_cycle_id=?", (open_id,)).fetchone()[0] == 0
