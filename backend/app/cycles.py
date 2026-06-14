@@ -248,12 +248,20 @@ def lock(conn, cycle_id):
     for o in obls:
         match = match_state(conn, o)
         code = disp_code(o["disposition"], o["settlement_mode"])
-        if code is None and policy == "auto_accept":   # concretize the suggestion
-            code = suggested(o, match, horizon)
-            disp, mode = CODE_TO_CANONICAL[code]
-            conn.execute(
-                "UPDATE obligations SET disposition = ?, settlement_mode = ? "
-                "WHERE obligation_id = ?", (disp, mode, o["obligation_id"]))
+        if code is None:
+            # No explicit disposition. Apply the suggestion so the FROZEN set
+            # equals what the UI / provisional /netting show as nettable (both use
+            # effective_code). "Upload implies acceptance of your own side" (spec
+            # §7): a matched, in-cycle pair defaults to net and is concretized +
+            # frozen here. Non-net suggestions (defer/direct) are only concretized
+            # under auto_accept; under 'roll' they stay pending and roll at settle.
+            suggestion = suggested(o, match, horizon)
+            if suggestion == "net" or policy == "auto_accept":
+                code = suggestion
+                disp, mode = CODE_TO_CANONICAL[code]
+                conn.execute(
+                    "UPDATE obligations SET disposition = ?, settlement_mode = ? "
+                    "WHERE obligation_id = ?", (disp, mode, o["obligation_id"]))
         if code == "net":                              # freeze net + nettable only
             _, nettable = pair_state(conn, o, match, code, horizon)
             if nettable:
