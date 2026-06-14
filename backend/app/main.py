@@ -803,12 +803,13 @@ def close_uploads(cycle_id: int):
 
 @app.post("/cycles/{cycle_id}/lock")
 def lock_cycle(cycle_id: int):
-    """RECONCILING → LOCKED; freeze the nettable snapshot, open the next cycle."""
+    """RECONCILING → LOCKED; freeze the nettable snapshot ONLY. Nothing rolls or
+    settles and the statement is unchanged — frozen invoices stay visible until
+    Run netting."""
     conn = get_conn()
     try:
         _require_audit_ok(conn)   # guard before advancing state
         frozen = cycles.lock(conn, cycle_id)
-        canonical.mint(conn)   # rolled obligations may move cycle; keep invoices current
         out = _project_cycle(conn, conn.execute(
             "SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone())
         out["frozen"] = frozen
@@ -852,6 +853,20 @@ def _active_cycle(conn, network_id, cycle_id=None):
     return conn.execute(
         "SELECT * FROM cycles WHERE network_id = ? AND state != 'closed' "
         "ORDER BY sequence_no LIMIT 1", (network_id,)).fetchone()
+
+
+def _statement_cycle(conn, network_id, cycle_id=None):
+    """Cycle the default statement should show. Prefer the most recent FINALIZED
+    cycle (one with persisted net_positions) so the statement never reads the
+    freshly-opened, empty next cycle (a '0 gross' statement). Before any cycle
+    has netted, fall back to the active working cycle for a provisional view."""
+    if cycle_id:
+        return conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
+    finalized = conn.execute(
+        "SELECT c.* FROM cycles c WHERE c.network_id = ? AND EXISTS "
+        "(SELECT 1 FROM net_positions np WHERE np.cycle_id = c.cycle_id) "
+        "ORDER BY c.sequence_no DESC LIMIT 1", (network_id,)).fetchone()
+    return finalized or _active_cycle(conn, network_id)
 
 
 def _netting_response(conn, cycle, party_id):
@@ -967,8 +982,10 @@ def run_netting(cycle_id: int, party_id: int = Depends(current_party_id)):
             raise HTTPException(409, f"Netting requires a LOCKED cycle (was '{cycle['state']}').")
         _require_audit_ok(conn)            # guard before advancing state
         try:
-            _net_and_persist(conn, cycle)  # → netted (uncommitted)
-            cycles.close(conn, cycle_id)   # → closed + opens the next cycle (commits)
+            _net_and_persist(conn, cycle)        # compute + write statement → netted
+            cycles.settle_roll_close(conn, cycle_id)  # archive netted, roll rest, close + open next
+            canonical.mint(conn)                 # refresh canonical cycle_id for rolled rows
+            conn.commit()
         except netting.NettingInvariantError as e:
             raise HTTPException(409, f"Netting invariant failed — cycle not netted: {e}")
         return _netting_response(conn,
@@ -1190,7 +1207,7 @@ def statement_summary(cycle_id: int = None, network_id: int = 1,
     conn = get_conn()
     try:
         _require_audit_ok(conn)
-        cycle = _active_cycle(conn, network_id, cycle_id)
+        cycle = _statement_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No cycle.")
         projection_cfg = {
@@ -1242,17 +1259,15 @@ def demo_advance(network_id: int = 1):
                 cycles.close_uploads(conn, cycle_id)
                 state = "reconciling"
             if state == "reconciling":
-                cycles.lock(conn, cycle_id)
-                canonical.mint(conn)       # rolled obligations may move cycle
+                cycles.lock(conn, cycle_id)        # freeze only
                 state = "locked"
             if state == "locked":
                 locked = conn.execute("SELECT * FROM cycles WHERE cycle_id = ?",
                                       (cycle_id,)).fetchone()
-                _net_and_persist(conn, locked)
+                _net_and_persist(conn, locked)             # compute + statement → netted
+                cycles.settle_roll_close(conn, cycle_id)   # archive + roll + close + open next
+                canonical.mint(conn)
                 conn.commit()
-                state = "netted"
-            if state == "netted":
-                cycles.close(conn, cycle_id)
                 state = "closed"
         except netting.NettingInvariantError as e:
             raise HTTPException(409, f"Netting invariant failed — advance blocked: {e}")

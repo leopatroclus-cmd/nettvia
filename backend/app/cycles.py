@@ -161,14 +161,16 @@ def ensure_open_cycle(conn, network_id):
 
 
 def close_uploads(conn, cycle_id):
-    """OPEN → RECONCILING. Late uploads route to the next open cycle."""
+    """OPEN → RECONCILING. Cut-off ONLY — nothing settles, nothing rolls, and the
+    next cycle is NOT opened here (Run netting opens it). Obligations stay put and
+    stay visible in the active view. A late upload arriving now will create its own
+    open cycle on demand (ensure_open_cycle), to be worked after this one closes."""
     c = conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
     if c is None:
         raise ValueError("Unknown cycle.")
     if c["state"] != "open":
         raise ValueError(f"close-uploads requires an OPEN cycle (was '{c['state']}').")
     conn.execute("UPDATE cycles SET state = 'reconciling' WHERE cycle_id = ?", (cycle_id,))
-    ensure_open_cycle(conn, c["network_id"])   # so new uploads have somewhere to land
     audit.append(conn, actor="operator", action="cycle_close_uploads",
                  entity_ref=f"cycle:{cycle_id}",
                  before={"state": "open"}, after={"state": "reconciling"})
@@ -177,15 +179,19 @@ def close_uploads(conn, cycle_id):
 
 
 def lock(conn, cycle_id):
-    """RECONCILING → LOCKED. Resolve no-action obligations per default_on_no_action,
-    freeze the nettable set into cycle_obligations (immutable), open the next cycle."""
+    """RECONCILING → LOCKED. FREEZE ONLY: snapshot the nettable set into
+    cycle_obligations and mark the cycle LOCKED. Nothing rolls, nothing is
+    archived, the next cycle is NOT opened, and assigned_cycle_id is untouched —
+    so every obligation (frozen or not) STAYS visible in the active view until
+    Run netting settles the cycle. The only disposition change here is
+    default_on_no_action='auto_accept' concretization, which must precede the
+    freeze so auto-accepted nettable rows are captured in the snapshot."""
     c = conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
     if c is None:
         raise ValueError("Unknown cycle.")
     if c["state"] != "reconciling":
         raise ValueError(f"lock requires a RECONCILING cycle (was '{c['state']}').")
 
-    nxt = ensure_open_cycle(conn, c["network_id"])
     policy = conn.execute(
         "SELECT default_on_no_action FROM networks WHERE network_id = ?", (c["network_id"],)
     ).fetchone()["default_on_no_action"]
@@ -198,36 +204,20 @@ def lock(conn, cycle_id):
     for o in obls:
         match = match_state(conn, o)
         code = disp_code(o["disposition"], o["settlement_mode"])
-        if code is None:                       # no action by the processing cut-off
-            if policy == "auto_accept":
-                code = suggested(o, match, horizon)
-                disp, mode = CODE_TO_CANONICAL[code]
-                conn.execute(
-                    "UPDATE obligations SET disposition = ?, settlement_mode = ? "
-                    "WHERE obligation_id = ?", (disp, mode, o["obligation_id"]))
-            else:                              # 'roll' → defer to next cycle
-                conn.execute(
-                    "UPDATE obligations SET assigned_cycle_id = ? WHERE obligation_id = ?",
-                    (nxt["cycle_id"], o["obligation_id"]))
-                continue
-
-        _, nettable = pair_state(conn, o, match, code, horizon)
-        if code == "net" and nettable:         # both sides accept & net, confirmed → freeze
+        if code is None and policy == "auto_accept":   # concretize the suggestion
+            code = suggested(o, match, horizon)
+            disp, mode = CODE_TO_CANONICAL[code]
             conn.execute(
-                "INSERT INTO cycle_obligations (cycle_id, obligation_id, frozen_amount, "
-                "frozen_currency) VALUES (?,?,?,?)",
-                (cycle_id, o["obligation_id"], o["amount"], o["currency"]))
-            frozen += 1
-        elif code in ("defer", "dispute", "net"):
-            # defer (long-dated), dispute (contested), and net-but-not-nettable
-            # (accepted to net but no confirmed nettable pair this cycle) all ROLL
-            # into the next cycle and stay active — net-not-nettable gets another
-            # netting attempt next cycle rather than being stranded.
-            conn.execute(
-                "UPDATE obligations SET assigned_cycle_id = ? WHERE obligation_id = ?",
-                (nxt["cycle_id"], o["obligation_id"]))
-        # 'direct' (settled outside netting) is settled this cycle → it remains in
-        # the closing cycle and leaves the active view when the cycle closes.
+                "UPDATE obligations SET disposition = ?, settlement_mode = ? "
+                "WHERE obligation_id = ?", (disp, mode, o["obligation_id"]))
+        if code == "net":                              # freeze net + nettable only
+            _, nettable = pair_state(conn, o, match, code, horizon)
+            if nettable:
+                conn.execute(
+                    "INSERT INTO cycle_obligations (cycle_id, obligation_id, frozen_amount, "
+                    "frozen_currency) VALUES (?,?,?,?)",
+                    (cycle_id, o["obligation_id"], o["amount"], o["currency"]))
+                frozen += 1
 
     conn.execute("UPDATE cycles SET state = 'locked' WHERE cycle_id = ?", (cycle_id,))
     audit.append(conn, actor="operator", action="cycle_lock",
@@ -238,21 +228,40 @@ def lock(conn, cycle_id):
     return frozen
 
 
-def close(conn, cycle_id):
-    """NETTED → CLOSED. Settlement is complete (demo: immediate); the next cycle
-    is already open (created at lock). Idempotently guarantees a next open cycle."""
+def settle_roll_close(conn, cycle_id):
+    """The settlement half of Run netting: NETTED → CLOSED, atomically.
+
+    Netted (frozen) and settle-direct obligations are SETTLED — they stay in this
+    now-closing cycle (and leave the active view when it closes). Everything else
+    unresolved (deferred / disputed / one-sided / no-action / accept-net-but-
+    unmatched) ROLLS into a fresh open cycle for another attempt. Called only
+    after net positions are computed (state must be 'netted')."""
     c = conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
     if c is None:
         raise ValueError("Unknown cycle.")
     if c["state"] != "netted":
-        raise ValueError(f"close requires a NETTED cycle (was '{c['state']}').")
-    ensure_open_cycle(conn, c["network_id"])
+        raise ValueError(f"settle requires a NETTED cycle (was '{c['state']}').")
+
+    nxt = ensure_open_cycle(conn, c["network_id"])   # the new open cycle to roll into
+    frozen_ids = {r["obligation_id"] for r in conn.execute(
+        "SELECT obligation_id FROM cycle_obligations WHERE cycle_id = ?", (cycle_id,))}
+    rolled = 0
+    for o in conn.execute("SELECT * FROM obligations WHERE assigned_cycle_id = ?", (cycle_id,)):
+        if o["obligation_id"] in frozen_ids:          # netted → settled, stays
+            continue
+        if disp_code(o["disposition"], o["settlement_mode"]) == "direct":
+            continue                                   # settle-direct → settled, stays
+        conn.execute("UPDATE obligations SET assigned_cycle_id = ? WHERE obligation_id = ?",
+                     (nxt["cycle_id"], o["obligation_id"]))
+        rolled += 1
+
     conn.execute("UPDATE cycles SET state = 'closed' WHERE cycle_id = ?", (cycle_id,))
     audit.append(conn, actor="operator", action="cycle_close",
                  entity_ref=f"cycle:{cycle_id}",
-                 before={"state": "netted"}, after={"state": "closed"})
+                 before={"state": "netted"},
+                 after={"state": "closed", "rolled": rolled, "next_cycle_id": nxt["cycle_id"]})
     conn.commit()
-    return conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
+    return {"rolled": rolled, "next_cycle_id": nxt["cycle_id"]}
 
 
 def is_locked(conn, cycle_id):
