@@ -264,6 +264,12 @@
   .hero-metrics .hm.hl .v{color:var(--net);}
   .hero-metrics .hm .x{font-size:10.5px; color:var(--muted); margin-top:2px;}
   .hero-assume{margin-top:16px; font-size:11.5px; color:var(--muted); background:#fff6e8; border:1px solid var(--reveal-line); border-radius:9px; padding:8px 12px;}
+  .stmt-projection{margin-top:14px; background:#f3f7f5; border:1px solid var(--line); border-radius:13px; padding:16px 20px;}
+  .stmt-projection .proj-tag{font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); font-weight:700; background:#e7eeea; border-radius:5px; padding:2px 7px;}
+  .stmt-projection .proj-line{font-size:15px; color:var(--ink); margin-top:10px;}
+  .stmt-projection .proj-line b{font-family:var(--mono);}
+  .stmt-projection .proj-per{color:var(--muted); font-size:12px;}
+  .stmt-projection .proj-break{font-size:11.5px; color:var(--muted); margin-top:6px;}
   .stmt-h2{font-size:15px; margin:26px 0 12px;}
   .stmt-cards{display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:14px;}
   .pcard{background:var(--surface); border:1px solid var(--line); border-radius:13px; padding:16px 18px;}
@@ -440,10 +446,17 @@
         <div class="hero-metrics">
           <div class="hm"><div class="k">Invoices netted</div><div class="v" id="stmt-invoices">—</div></div>
           <div class="hm"><div class="k">Parties in the net</div><div class="v" id="stmt-parties">—</div></div>
-          <div class="hm"><div class="k">Payments</div><div class="v" id="stmt-payments">—</div><div class="x" id="stmt-payments-x">before → after</div></div>
-          <div class="hm hl"><div class="k">Estimated savings</div><div class="v" id="stmt-savings">—</div><div class="x" id="stmt-savings-x"></div></div>
+          <div class="hm"><div class="k">Net settlements</div><div class="v" id="stmt-settlements">—</div><div class="x">one per netting party</div></div>
+          <div class="hm hl"><div class="k">Value held back</div><div class="v" id="stmt-compressed">—</div><div class="x">cash that doesn’t move</div></div>
         </div>
         <div class="hero-assume" id="stmt-assume"></div>
+      </div>
+
+      <!-- AT-SCALE projection — clearly separate from this cycle's actuals -->
+      <div class="stmt-projection" id="stmt-projection">
+        <span class="proj-tag">Projection · not this cycle</span>
+        <div class="proj-line">At ~<b id="proj-vol">—</b> cross-border payments/month, estimated fees + FX ≈ <b id="proj-total">—</b><span class="proj-per">/month</span></div>
+        <div class="proj-break" id="proj-break"></div>
       </div>
 
       <h2 class="stmt-h2">Per party</h2>
@@ -819,20 +832,30 @@ async function loadStatement(){
   document.getElementById('stmt-meta').textContent =
     `${n.invoices_netted} invoices · ${n.parties_in_net} parties · settles ${d.settlement_date||'—'}`;
 
+  // Value-held-back = gross − net per currency (the real per-cycle benefit).
+  const held = n.gross_settled.map(g=>{
+    const ns = (n.net_to_settle.find(x=>x.currency===g.currency)||{}).major || 0;
+    return {currency:g.currency, major:g.major - ns};
+  });
   document.getElementById('stmt-gross').textContent = moneyList(n.gross_settled);
   document.getElementById('stmt-net').textContent = moneyList(n.net_to_settle);
   document.getElementById('stmt-pct').textContent = n.compression_pct + '%';
   document.getElementById('stmt-invoices').textContent = n.invoices_netted;
   document.getElementById('stmt-parties').textContent = n.parties_in_net;
-  document.getElementById('stmt-payments').textContent = `${n.gross_payments} → ${n.net_payments}`;
-  document.getElementById('stmt-payments-x').textContent =
-    `${n.gross_payments - n.net_payments} payments eliminated`;
-  document.getElementById('stmt-savings').textContent = '€'+(n.savings_major).toLocaleString('en-US');
-  document.getElementById('stmt-savings-x').textContent =
-    `fees €${(n.fees_avoided_minor/100).toLocaleString('en-US')} + FX €${(n.fx_avoided_minor/100).toLocaleString('en-US')}`;
+  document.getElementById('stmt-settlements').textContent = n.net_settlements;
+  document.getElementById('stmt-compressed').textContent = moneyList(held);
+
+  // At-scale projection — explicitly NOT this cycle's numbers.
+  const pr = d.projection;
+  document.getElementById('proj-vol').textContent = pr.monthly_volume.toLocaleString('en-US');
+  document.getElementById('proj-total').textContent = '€'+pr.monthly_total_major.toLocaleString('en-US');
+  document.getElementById('proj-break').textContent =
+    `≈ fees €${(pr.monthly_fees_minor/100).toLocaleString('en-US')} + FX €${(pr.monthly_fx_minor/100).toLocaleString('en-US')} per month, at €${a.wire_fee_major}/payment and ${a.fx_rate_pct}% FX on a €${pr.avg_ticket_major.toLocaleString('en-US')} representative ticket. A forward projection, not this cycle's actuals.`;
+
   document.getElementById('stmt-assume').innerHTML =
-    `<b>Assumptions (adjustable):</b> wire fee €${a.wire_fee_major} per international payment avoided · FX spread ${a.fx_rate_pct}% on cross-currency netted value. ` +
-    `Savings are estimates shown with their assumptions, not exact figures.`;
+    `<b>This cycle's benefit is value compression</b> — ${n.compression_pct}% of gross doesn't move. ` +
+    `Distinct settlements don't drop on a closed ring, so no per-cycle fee figure is claimed. ` +
+    `Assumptions (adjustable): wire fee €${a.wire_fee_major}/payment · FX ${a.fx_rate_pct}%. Estimates, not exact.`;
 
   document.getElementById('stmt-parties-cards').innerHTML = d.parties.map(p=>{
     const net = p.positions.map(x=>{
@@ -847,9 +870,9 @@ async function loadStatement(){
       ${net}
       <div class="prow"><span>Gross receivable</span><span>${moneyList(p.gross_ar)}</span></div>
       <div class="prow"><span>Gross payable</span><span>${moneyList(p.gross_ap)}</span></div>
-      <div class="prow"><span>Payments</span><span>${p.gross_payments} → ${p.net_payments}</span></div>
+      <div class="prow"><span>Cross-border movements</span><span>${p.gross_payments} → ${p.net_payments}</span></div>
       <div class="pinv"><b>${p.invoices_netted} invoice${p.invoices_netted===1?'':'s'} netted</b>${invs}</div>
-      <div class="psave">Money saved: <b>€${p.money_saved_major.toLocaleString('en-US')}</b> <span class="hint">((${p.invoices_netted}−1) × €${a.wire_fee_major} + FX)</span></div>
+      <div class="psave">Est. fee saved: <b>€${p.money_saved_major.toLocaleString('en-US')}</b> <span class="hint">(${Math.max(0,p.invoices_netted-1)} fewer movement${p.invoices_netted-1===1?'':'s'} × €${a.wire_fee_major} + FX)</span></div>
     </div>`;
   }).join('') || '<p class="hint">No parties in this net.</p>';
 

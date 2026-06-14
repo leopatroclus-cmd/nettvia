@@ -70,29 +70,40 @@ def test_eur_ring_statement_math(client, conn):
     assert pos == {1: -400, 2: 500, 3: -300, 5: 600, 4: -400}
     assert sum(pos.values()) == 0
 
-    # Payments: 16 nettable obligations → 5 net settlements.
-    assert net["gross_payments"] == 16 and net["net_payments"] == 5
-
-    # Savings show their assumptions; single-currency ⇒ FX avoided = €0.
-    assert net["fx_avoided_minor"] == 0
-    assert net["fees_avoided_minor"] == (16 - 5) * 3000     # 11 × €30
-    assert net["savings_minor"] == net["fees_avoided_minor"]
+    # HONEST network figure: 5 net settlements (one per netting party). No
+    # inflated per-cycle "fees avoided / payments eliminated" is reported.
+    assert net["net_settlements"] == 5
+    assert "fees_avoided_minor" not in net and "savings_minor" not in net
+    assert "gross_payments" not in net
     assert s["assumptions"]["wire_fee_major"] == 30.0
     assert s["assumptions"]["fx_rate_pct"] == 0.6
 
-    # Per-party detail: invoices listed, one net settlement, savings = (n−1)×fee.
+    # AT-SCALE projection (separate from this cycle): fees + FX at monthly volume.
+    proj = s["projection"]
+    assert proj["monthly_volume"] == 1000
+    assert proj["monthly_fees_minor"] == 1000 * 3000            # volume × €30
+    assert proj["avg_ticket_minor"] == 5310000 // 8             # cycle mean ticket
+    assert proj["monthly_fx_minor"] == int(1000 * (5310000 // 8) * 0.006)
+    assert proj["monthly_total_minor"] == proj["monthly_fees_minor"] + proj["monthly_fx_minor"]
+
+    # Per-party detail: invoices listed, payments N → 1 (honest at party level),
+    # one-fewer-movement saving = (n − 1) × fee.
     by_id = {p["party_id"]: p for p in s["parties"]}
     aegean = by_id[1]
     assert aegean["invoices_netted"] == 3 and len(aegean["invoice_list"]) == 3
-    assert aegean["net_payments"] == 1
+    assert aegean["gross_payments"] == 3 and aegean["net_payments"] == 1
     assert aegean["money_saved_major"] == 60          # (3 − 1) × €30
     assert by_id[3]["money_saved_major"] == 90        # Pacific is in 4 invoices
     assert {e["ref"] for e in aegean["invoice_list"]} == {"RING-1", "RING-5", "RING-8"}
 
 
 def test_summary_assumptions_adjustable(client):
-    """Wire fee + FX rate are adjustable per request and echoed on the statement."""
+    """Wire fee, FX rate, and monthly volume are adjustable per request and
+    drive the at-scale projection."""
     client.post("/demo/advance")               # net the seeded cycle
-    s = client.get("/statement/summary", params={"wire_fee": 50, "fx_rate": 0.01}).json()
+    s = client.get("/statement/summary",
+                   params={"wire_fee": 50, "fx_rate": 0.01, "monthly_volume": 2000}).json()
     assert s["assumptions"]["wire_fee_major"] == 50.0
     assert s["assumptions"]["fx_rate_pct"] == 1.0
+    assert s["projection"]["monthly_volume"] == 2000
+    assert s["projection"]["monthly_fees_minor"] == 2000 * 5000   # 2000 × €50

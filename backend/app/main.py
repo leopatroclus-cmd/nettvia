@@ -1007,6 +1007,7 @@ def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, n
 # Adjustable assumptions, displayed on the statement so the numbers are defensible.
 WIRE_FEE_MAJOR_DEFAULT = 30.0    # € per international payment avoided
 FX_RATE_DEFAULT = 0.006          # 0.6% spread on cross-currency netted value
+MONTHLY_VOLUME_DEFAULT = 1000    # cross-border payments/month, for the at-scale projection
 
 
 def _money_list(conn, by_ccy):
@@ -1018,7 +1019,7 @@ def _money_list(conn, by_ccy):
     return out
 
 
-def _statement_summary(conn, cycle, wire_fee_minor, fx_rate):
+def _statement_summary(conn, cycle, wire_fee_minor, fx_rate, monthly_volume):
     """Network headline + per-party breakdown for a cycle's netting set."""
     result = netting.compute(conn, cycle)           # guards Σnet=0 + reconstruction
     invoices, positions = result["invoices"], result["positions"]
@@ -1038,21 +1039,31 @@ def _statement_summary(conn, cycle, wire_fee_minor, fx_rate):
         if s["net"] > 0:
             net_by_ccy[s["currency"]] = net_by_ccy.get(s["currency"], 0) + s["net"]
 
-    # Primary currency = largest gross; anything else is "cross-currency" value.
+    # Primary currency = largest gross; anything else is "cross-currency" value
+    # (used per-party for the FX leg).
     primary = max(gross_by_ccy, key=gross_by_ccy.get) if gross_by_ccy else None
-    cross_value = sum(v for c, v in gross_by_ccy.items() if c != primary)
 
     total_gross = sum(gross_by_ccy.values())        # minor, summed (exact for 1 ccy)
     total_net = sum(net_by_ccy.values())
     compression_pct = round(100 * (1 - total_net / total_gross)) if total_gross else 0
 
-    g_counts, n_counts = netting.compression(invoices, positions)
-    gross_payments = sum(g_counts.values())         # accepted nettable obligations
-    net_payments = sum(n_counts.values())           # party-currencies with non-zero net
+    # HONEST network settlement count: one net settlement per party with a
+    # non-zero net position. We deliberately do NOT report a per-cycle "fees
+    # avoided / payments eliminated" figure: summing both ledger sides of each
+    # invoice double-counts, and for a ring settled through the centre the
+    # distinct money-transfers don't actually drop — the per-cycle benefit is
+    # VALUE compression (the gross→net hero), not transfer count.
+    _, n_counts = netting.compression(invoices, positions)
+    net_settlements = sum(n_counts.values())
 
-    fees_avoided = max(0, gross_payments - net_payments) * wire_fee_minor
-    fx_avoided = int(round(cross_value * fx_rate))
-    savings = fees_avoided + fx_avoided
+    # AT-SCALE projection (NOT this cycle's actuals): the addressable fee + FX
+    # cost flowing through cross-border payments at a configurable monthly
+    # volume, at the current assumptions. avg_ticket is this cycle's mean invoice
+    # value, used as a representative payment size for the FX leg.
+    avg_ticket = (total_gross // len(invoices)) if invoices else 0
+    proj_fees = monthly_volume * wire_fee_minor
+    proj_fx = int(monthly_volume * avg_ticket * fx_rate)
+    proj_total = proj_fees + proj_fx
 
     # Per-party: invoices (with refs), gross AR/AP, net positions, payments, savings.
     by_party = {}   # party_id -> list of (role, ci)
@@ -1129,11 +1140,17 @@ def _statement_summary(conn, cycle, wire_fee_minor, fx_rate):
             "gross_settled": _money_list(conn, gross_by_ccy),
             "net_to_settle": _money_list(conn, net_by_ccy),
             "compression_pct": compression_pct,
-            "gross_payments": gross_payments, "net_payments": net_payments,
-            "fees_avoided_minor": fees_avoided,
-            "fx_avoided_minor": fx_avoided,
-            "savings_minor": savings,
-            "savings_major": refdata.to_major(savings, 2),
+            "net_settlements": net_settlements,   # honest: one net settlement per netting party
+        },
+        # Clearly separate from this cycle's actuals — a forward projection.
+        "projection": {
+            "monthly_volume": monthly_volume,
+            "avg_ticket_minor": avg_ticket,
+            "avg_ticket_major": refdata.to_major(avg_ticket, 2),
+            "monthly_fees_minor": proj_fees,
+            "monthly_fx_minor": proj_fx,
+            "monthly_total_minor": proj_total,
+            "monthly_total_major": refdata.to_major(proj_total, 2),
         },
         "parties": parties_out,
     }
@@ -1142,9 +1159,11 @@ def _statement_summary(conn, cycle, wire_fee_minor, fx_rate):
 @app.get("/statement/summary")
 def statement_summary(cycle_id: int = None, network_id: int = 1,
                       wire_fee: float = WIRE_FEE_MAJOR_DEFAULT,
-                      fx_rate: float = FX_RATE_DEFAULT):
-    """Presentation-grade cycle statement: network headline + per-party detail.
-    Savings assumptions (wire_fee €, fx_rate) are adjustable and echoed back."""
+                      fx_rate: float = FX_RATE_DEFAULT,
+                      monthly_volume: int = MONTHLY_VOLUME_DEFAULT):
+    """Presentation-grade cycle statement: value-compression headline + per-party
+    detail + a clearly-separated at-scale projection. Assumptions (wire_fee €,
+    fx_rate, monthly_volume) are adjustable and echoed back; nothing is exact."""
     conn = get_conn()
     try:
         _require_audit_ok(conn)
@@ -1152,7 +1171,8 @@ def statement_summary(cycle_id: int = None, network_id: int = 1,
         if cycle is None:
             raise HTTPException(404, "No cycle.")
         try:
-            return _statement_summary(conn, cycle, int(round(wire_fee * 100)), fx_rate)
+            return _statement_summary(conn, cycle, int(round(wire_fee * 100)),
+                                      fx_rate, monthly_volume)
         except netting.NettingInvariantError as e:
             raise HTTPException(409, f"Netting invariant failed — statement blocked: {e}")
     finally:
