@@ -21,6 +21,15 @@ def db_path(tmp_path, monkeypatch):
     return p
 
 
+@pytest.fixture(autouse=True)
+def _reset_demo_party():
+    """The demo 'acting as' party is process-wide; reset it to Aegean (1) so a
+    test that switches parties can't leak into the next one."""
+    from app import main
+    main._demo_session["current_party_id"] = main.CURRENT_PARTY_ID
+    yield
+
+
 @pytest.fixture
 def conn(db_path):
     from app.db import get_conn

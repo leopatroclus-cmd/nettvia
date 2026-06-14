@@ -55,6 +55,14 @@
   }
   .topbar .who{font-size:13px; color:var(--ink-soft);}
   .topbar .who b{color:var(--ink);}
+  .topbar-right{display:flex; align-items:center; gap:14px;}
+  .actas{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted);
+    background:#fbf6ef; border:1px solid var(--reveal-line); border-radius:9px; padding:5px 10px;}
+  .actas .tag{font-family:var(--mono); font-size:9.5px; letter-spacing:.08em; color:#9a7b3c;
+    background:#f3e6cf; border-radius:4px; padding:1px 5px;}
+  .actas label{color:var(--ink-soft);}
+  .actas select{font:inherit; font-size:12px; border:1px solid var(--line); border-radius:7px;
+    padding:4px 6px; background:var(--surface); color:var(--ink); cursor:pointer; max-width:200px;}
   .cyc-chip{
     display:inline-flex; align-items:center; gap:9px; font-size:12px; color:var(--ink-soft);
     background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:6px 13px;
@@ -252,13 +260,20 @@
       <div class="nav-item active" data-view="accounts"><span class="dot"></span>Accounts</div>
       <div class="nav-item" data-view="netting"><span class="dot"></span>Netting</div>
     </nav>
-    <div class="side-foot">Signed in as<br><b>Aegean Air Cargo S.A.</b><br>Athens · GR</div>
+    <div class="side-foot">Signed in as<br><b id="side-party">Aegean Air Cargo S.A.</b><br><span id="side-loc">Athens · GR</span></div>
   </aside>
 
   <main>
     <div class="topbar">
-      <div class="who">Reconciliation &amp; netting · <b>Aegean Air Cargo S.A.</b></div>
-      <div class="cyc-chip"><span class="pip"></span>Cycle <span class="num">2026-06</span> · closes in <span class="num">11d</span></div>
+      <div class="who">Reconciliation &amp; netting · <b id="who-party">Aegean Air Cargo S.A.</b></div>
+      <div class="topbar-right">
+        <div class="actas" title="Demo only — act as any party. Not authentication.">
+          <span class="tag">DEMO</span>
+          <label for="actas-select">Acting as</label>
+          <select id="actas-select" onchange="switchParty(this.value)"></select>
+        </div>
+        <div class="cyc-chip"><span class="pip"></span>Cycle <span class="num">2026-06</span> · closes in <span class="num">11d</span></div>
+      </div>
     </div>
 
     <!-- ============ ACCOUNTS ============ -->
@@ -504,6 +519,49 @@ function updateTally(){
   document.getElementById('tally-count').textContent = `${netted.length} invoice${netted.length===1?'':'s'}`;
   const parts = Object.keys(byCcy).length ? Object.entries(byCcy).map(([c,v])=>fmt(v,c)).join('  ·  ') : '€0';
   document.getElementById('tally-net').textContent = parts;
+}
+
+/* ---------- demo party switcher (Phase A — DEMO ONLY, not auth) ---------- */
+let actingParty = null;
+
+function refreshAll(){
+  loadObligations(); loadPartners();
+  const active = document.querySelector('.nav-item.active');
+  if(active && active.dataset.view==='netting'){ loadCycle(); loadNetting(); }
+}
+
+async function loadDemoSession(){
+  try{
+    const res = await fetch('/demo/session');
+    if(!res.ok) return;
+    const d = await res.json();
+    actingParty = d.current_party_id;
+    const sel = document.getElementById('actas-select');
+    sel.innerHTML = d.parties.map(p=>
+      `<option value="${p.party_id}" data-country="${esc(p.country||'')}"${p.party_id===d.current_party_id?' selected':''}>${esc(p.legal_name)}</option>`
+    ).join('');
+    const me = d.parties.find(p=>p.party_id===d.current_party_id);
+    if(me) setActingLabels(me.legal_name, me.country);
+  }catch(e){ /* demo switcher unavailable */ }
+}
+
+function setActingLabels(name, country){
+  document.getElementById('who-party').textContent = name;
+  document.getElementById('side-party').textContent = name;
+  document.getElementById('side-loc').textContent = country || '—';
+}
+
+async function switchParty(id){
+  try{
+    const res = await fetch('/demo/session', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({party_id:+id})});
+    if(!res.ok){ const e = await res.json().catch(()=>({})); throw new Error(e.detail||('HTTP '+res.status)); }
+    const d = await res.json();
+    actingParty = d.current_party_id;
+    const opt = document.querySelector(`#actas-select option[value="${id}"]`);
+    setActingLabels(d.legal_name, opt ? opt.dataset.country : '');
+    refreshAll();
+  }catch(e){ alert('Could not switch party: '+e.message); }
 }
 
 /* ---------- partners (tax_id primary identifier + edit) ---------- */
@@ -775,7 +833,7 @@ async function loadObligations(){
   }
   render();
 }
-loadObligations(); loadCycle(); loadNetting(); loadPartners();
+loadDemoSession(); loadObligations(); loadCycle(); loadNetting(); loadPartners();
 </script>
 </body>
 </html>

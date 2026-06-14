@@ -9,8 +9,9 @@ import json
 import os
 from collections import Counter
 from datetime import date, datetime
+from typing import Optional
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -20,8 +21,22 @@ from .db import get_conn, init_db
 
 _SYM = {"EUR": "€", "USD": "$", "CHF": "CHF ", "GBP": "£"}
 
-# The signed-in party in the prototype (Aegean Air Cargo S.A.).
+# Default signed-in party (Aegean Air Cargo S.A.) when nothing is selected.
 CURRENT_PARTY_ID = 1
+
+# DEMO ONLY — the "acting as" party for the live demo, a single process-wide
+# selection set from the UI party switcher (see /demo/session). Fine for a
+# single-presenter demo; it is NOT auth and gates nothing. When real auth lands,
+# replace current_party_id() below with the authenticated principal and drop
+# this dict and the /demo/session routes.
+_demo_session = {"current_party_id": CURRENT_PARTY_ID}
+
+
+def current_party_id(party_id: Optional[int] = None) -> int:
+    """The party a request acts as. An explicit ?party_id= overrides; otherwise
+    the demo 'acting as' selection is used. The real auth phase replaces the
+    body with the principal resolved from the auth token."""
+    return party_id if party_id is not None else _demo_session["current_party_id"]
 
 FRONTEND_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "frontend"))
@@ -94,7 +109,7 @@ def _project(row, conn):
 
 
 @app.get("/obligations")
-def get_obligations(party_id: int = CURRENT_PARTY_ID):
+def get_obligations(party_id: int = Depends(current_party_id)):
     """Obligations owned by the signed-in party, in the prototype's shape."""
     conn = get_conn()
     try:
@@ -109,7 +124,7 @@ def get_obligations(party_id: int = CURRENT_PARTY_ID):
 
 
 @app.post("/dispositions")
-def set_dispositions(payload: dict = Body(...), party_id: int = CURRENT_PARTY_ID):
+def set_dispositions(payload: dict = Body(...), party_id: int = Depends(current_party_id)):
     """Persist a disposition (accept & net / settle direct / defer / dispute) for
     one or more of the signed-in party's obligations. Bulk via `ids`.
 
@@ -310,12 +325,15 @@ def _resolve_batch(conn, party_id, rows, mapping_dict):
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...), party_id: int = Form(CURRENT_PARTY_ID)):
+async def upload(file: UploadFile = File(...), party_id: Optional[int] = Form(None)):
     """Parse a CSV/XLSX, propose (or recall) a schema mapping, stage the batch.
 
+    The batch (and the obligations it later creates) is OWNED BY the current
+    party — an explicit party_id form field overrides, else the demo selection.
     Returns the proposed mapping + summary counts for the Upload screen. No
     obligations are created until /upload/{batch_id}/confirm.
     """
+    party_id = current_party_id(party_id)
     content = await file.read()
     try:
         headers, rows = ingest.parse_upload(file.filename, content)
@@ -457,7 +475,7 @@ def confirm_upload(batch_id: int, payload: dict = Body(default=None)):
 
 
 @app.get("/resolutions")
-def list_resolutions(party_id: int = CURRENT_PARTY_ID):
+def list_resolutions(party_id: int = Depends(current_party_id)):
     """Counterparties still awaiting a resolution decision."""
     conn = get_conn()
     try:
@@ -467,7 +485,7 @@ def list_resolutions(party_id: int = CURRENT_PARTY_ID):
 
 
 @app.post("/resolutions/confirm")
-def confirm_resolution(payload: dict = Body(...), party_id: int = CURRENT_PARTY_ID):
+def confirm_resolution(payload: dict = Body(...), party_id: int = Depends(current_party_id)):
     """Confirm a counterparty: resolve to an existing party_id, or create a new
     (off-network) party when it's genuinely new. Writes the alias and resolves
     all of that counterparty's obligations."""
@@ -550,7 +568,7 @@ def _party_view(conn, owner_id, p):
 
 
 @app.get("/parties")
-def list_parties(party_id: int = CURRENT_PARTY_ID):
+def list_parties(party_id: int = Depends(current_party_id)):
     """The signed-in party's trading partners, identity-first (tax_id primary).
     Excludes the signed-in party itself and the network operator (admin)."""
     conn = get_conn()
@@ -566,7 +584,7 @@ def list_parties(party_id: int = CURRENT_PARTY_ID):
 
 @app.patch("/parties/{party_id}")
 def edit_party(party_id: int, payload: dict = Body(...),
-               actor_party_id: int = CURRENT_PARTY_ID):
+               actor_party_id: int = Depends(current_party_id)):
     """Edit a partner's identity: legal_name, tax_id, country, group_id.
 
     on_network is DERIVED from ledger ownership — not editable here. tax_id is
@@ -630,6 +648,47 @@ def edit_party(party_id: int, payload: dict = Body(...),
         updated = conn.execute("SELECT * FROM parties WHERE party_id = ?",
                                (party_id,)).fetchone()
         return _party_view(conn, actor_party_id, updated)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Demo party switcher (Phase A) — DEMO ONLY, not auth. Lets the presenter act
+# as any party in a live demo. The real auth phase removes these two routes and
+# resolves the principal from the auth token instead (see current_party_id()).
+# ---------------------------------------------------------------------------
+
+@app.get("/demo/session")
+def get_demo_session():
+    """Current 'acting as' party + the full party list for the UI switcher."""
+    conn = get_conn()
+    try:
+        parties = conn.execute(
+            "SELECT party_id, legal_name, country FROM parties ORDER BY party_id"
+        ).fetchall()
+        return {
+            "current_party_id": _demo_session["current_party_id"],
+            "parties": [{"party_id": p["party_id"], "legal_name": p["legal_name"],
+                         "country": p["country"]} for p in parties],
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/demo/session")
+def set_demo_session(payload: dict = Body(...)):
+    """Switch the 'acting as' party for the session. DEMO ONLY — no auth, gates
+    nothing; it only changes which party subsequent requests are attributed to."""
+    pid = (payload or {}).get("party_id")
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT party_id, legal_name FROM parties WHERE party_id = ?", (pid,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Unknown party.")
+        _demo_session["current_party_id"] = row["party_id"]
+        return {"current_party_id": row["party_id"], "legal_name": row["legal_name"]}
     finally:
         conn.close()
 
@@ -812,7 +871,7 @@ def _netting_response(conn, cycle, party_id):
 
 
 @app.get("/netting")
-def get_netting(party_id: int = CURRENT_PARTY_ID, network_id: int = 1):
+def get_netting(party_id: int = Depends(current_party_id), network_id: int = 1):
     """Netting result (regenerable) for the active cycle — provisional until lock."""
     conn = get_conn()
     try:
@@ -828,7 +887,7 @@ def get_netting(party_id: int = CURRENT_PARTY_ID, network_id: int = 1):
 
 
 @app.post("/cycles/{cycle_id}/net")
-def run_netting(cycle_id: int):
+def run_netting(cycle_id: int, party_id: int = Depends(current_party_id)):
     """LOCKED → NETTED: compute net positions over the snapshot and persist them
     as a (regenerable) projection / statement record."""
     conn = get_conn()
@@ -864,13 +923,13 @@ def run_netting(cycle_id: int):
         conn.commit()
         return _netting_response(conn,
                                  conn.execute("SELECT * FROM cycles WHERE cycle_id = ?",
-                                              (cycle_id,)).fetchone(), CURRENT_PARTY_ID)
+                                              (cycle_id,)).fetchone(), party_id)
     finally:
         conn.close()
 
 
 @app.get("/statement")
-def statement(party_id: int = CURRENT_PARTY_ID, cycle_id: int = None, network_id: int = 1):
+def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, network_id: int = 1):
     """Per-party per-cycle statement, including the reconstruction key."""
     conn = get_conn()
     try:
