@@ -63,6 +63,12 @@
   .actas label{color:var(--ink-soft);}
   .actas select{font:inherit; font-size:12px; border:1px solid var(--line); border-radius:7px;
     padding:4px 6px; background:var(--surface); color:var(--ink); cursor:pointer; max-width:200px;}
+  .actas .demo-btn{font:inherit; font-size:12px; padding:4px 10px; border-radius:7px; cursor:pointer;
+    border:1px solid #cda95f; background:#fff; color:#8a6a25;}
+  .actas .demo-btn:hover{background:#fbf3e3;}
+  .actas .demo-btn.danger{border-color:#e0b4b4; color:#9a3434;}
+  .actas .demo-btn.danger:hover{background:#fbeeee;}
+  .actas .demo-btn:disabled{opacity:.5; cursor:default;}
   .cyc-chip{
     display:inline-flex; align-items:center; gap:9px; font-size:12px; color:var(--ink-soft);
     background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:6px 13px;
@@ -267,10 +273,12 @@
     <div class="topbar">
       <div class="who">Reconciliation &amp; netting · <b id="who-party">Aegean Air Cargo S.A.</b></div>
       <div class="topbar-right">
-        <div class="actas" title="Demo only — act as any party. Not authentication.">
+        <div class="actas" title="Demo only — these drive the demo. Not production actions.">
           <span class="tag">DEMO</span>
           <label for="actas-select">Acting as</label>
           <select id="actas-select" onchange="switchParty(this.value)"></select>
+          <button class="demo-btn" id="demo-advance" onclick="advanceCycle()" title="Lock, net, close the open cycle and open the next — now.">Advance cycle ⏭</button>
+          <button class="demo-btn danger" id="demo-reset" onclick="resetDemo()" title="Clear all transactions and reopen a fresh cycle. Parties are kept.">Reset</button>
         </div>
         <div class="cyc-chip"><span class="pip"></span>Cycle <span class="num">2026-06</span> · closes in <span class="num">11d</span></div>
       </div>
@@ -562,6 +570,36 @@ async function switchParty(id){
     setActingLabels(d.legal_name, opt ? opt.dataset.country : '');
     refreshAll();
   }catch(e){ alert('Could not switch party: '+e.message); }
+}
+
+/* ---------- demo controls: advance cycle + reset (DEMO ONLY) ---------- */
+async function advanceCycle(){
+  const btn = document.getElementById('demo-advance');
+  btn.disabled = true;
+  try{
+    const res = await fetch('/demo/advance', {method:'POST'});
+    if(!res.ok){ const e = await res.json().catch(()=>({})); throw new Error(e.detail||('HTTP '+res.status)); }
+    const d = await res.json();
+    refreshAll(); loadCycle(); loadNetting();
+    const adv = d.advanced, nxt = d.next_cycle;
+    alert(`Cycle ${adv.label} ${adv.state} · ${adv.frozen_count} invoice(s) netted.\nNow open: cycle ${nxt.label}.`);
+  }catch(e){ alert('Advance failed: '+e.message); }
+  finally{ btn.disabled = false; }
+}
+
+async function resetDemo(){
+  if(!confirm('Reset the demo? This clears ALL transactions (uploads, matches, dispositions, cycles, netting) and reopens a fresh cycle. Parties and their tax IDs are kept.')) return;
+  const btn = document.getElementById('demo-reset');
+  btn.disabled = true;
+  try{
+    const res = await fetch('/demo/reset', {method:'POST'});
+    if(!res.ok){ const e = await res.json().catch(()=>({})); throw new Error(e.detail||('HTTP '+res.status)); }
+    await loadDemoSession();              // acting party reset to default
+    refreshAll(); loadCycle(); loadNetting();
+    document.getElementById('panel-entities')?.classList.add('hidden');
+    go('accounts');
+  }catch(e){ alert('Reset failed: '+e.message); }
+  finally{ btn.disabled = false; }
 }
 
 /* ---------- partners (tax_id primary identifier + edit) ---------- */

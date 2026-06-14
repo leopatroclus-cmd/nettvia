@@ -886,6 +886,33 @@ def get_netting(party_id: int = Depends(current_party_id), network_id: int = 1):
         conn.close()
 
 
+def _net_and_persist(conn, cycle):
+    """LOCKED → NETTED: compute net positions over the frozen snapshot, persist
+    them as a (regenerable) projection, advance the cycle. Caller owns the txn.
+    Raises netting.NettingInvariantError if the Σnet=0 / reconstruction guard trips."""
+    cycle_id = cycle["cycle_id"]
+    result = netting.compute(conn, cycle)         # guards Σnet=0 + reconstruction
+    gross, net = netting.compression(result["invoices"], result["positions"])
+    cpp = conn.execute(
+        "SELECT cost_per_payment FROM networks WHERE network_id = ?",
+        (cycle["network_id"],)).fetchone()["cost_per_payment"] or 0
+    conn.execute("DELETE FROM net_positions WHERE cycle_id = ?", (cycle_id,))
+    for s in result["positions"]:
+        g, n = gross.get(s["party_id"], 0), net.get(s["party_id"], 0)
+        conn.execute(
+            "INSERT INTO net_positions (cycle_id, party_id, currency, gross_payable, "
+            "gross_receivable, net_amount, gross_payment_count, net_payment_count, "
+            "estimated_savings) VALUES (?,?,?,?,?,?,?,?,?)",
+            (cycle_id, s["party_id"], s["currency"], s["payable"], s["receivable"],
+             s["net"], g, n, int(round((g - n) * cpp * 100))))
+    conn.execute("UPDATE cycles SET state = 'netted' WHERE cycle_id = ?", (cycle_id,))
+    audit.append(conn, actor="operator", action="cycle_netted",
+                 entity_ref=f"cycle:{cycle_id}",
+                 after={"positions": len(result["positions"]),
+                        "sum_by_currency": result["sum_by_currency"]})
+    return result
+
+
 @app.post("/cycles/{cycle_id}/net")
 def run_netting(cycle_id: int, party_id: int = Depends(current_party_id)):
     """LOCKED → NETTED: compute net positions over the snapshot and persist them
@@ -899,27 +926,9 @@ def run_netting(cycle_id: int, party_id: int = Depends(current_party_id)):
             raise HTTPException(409, f"Netting requires a LOCKED cycle (was '{cycle['state']}').")
         _require_audit_ok(conn)            # guard before advancing state
         try:
-            result = netting.compute(conn, cycle)   # guards Σnet=0 + reconstruction
+            _net_and_persist(conn, cycle)
         except netting.NettingInvariantError as e:
             raise HTTPException(409, f"Netting invariant failed — cycle not netted: {e}")
-        gross, net = netting.compression(result["invoices"], result["positions"])
-        cpp = conn.execute(
-            "SELECT cost_per_payment FROM networks WHERE network_id = ?",
-            (cycle["network_id"],)).fetchone()["cost_per_payment"] or 0
-        conn.execute("DELETE FROM net_positions WHERE cycle_id = ?", (cycle_id,))
-        for s in result["positions"]:
-            g, n = gross.get(s["party_id"], 0), net.get(s["party_id"], 0)
-            conn.execute(
-                "INSERT INTO net_positions (cycle_id, party_id, currency, gross_payable, "
-                "gross_receivable, net_amount, gross_payment_count, net_payment_count, "
-                "estimated_savings) VALUES (?,?,?,?,?,?,?,?,?)",
-                (cycle_id, s["party_id"], s["currency"], s["payable"], s["receivable"],
-                 s["net"], g, n, int(round((g - n) * cpp * 100))))
-        conn.execute("UPDATE cycles SET state = 'netted' WHERE cycle_id = ?", (cycle_id,))
-        audit.append(conn, actor="operator", action="cycle_netted",
-                     entity_ref=f"cycle:{cycle_id}",
-                     after={"positions": len(result["positions"]),
-                            "sum_by_currency": result["sum_by_currency"]})
         conn.commit()
         return _netting_response(conn,
                                  conn.execute("SELECT * FROM cycles WHERE cycle_id = ?",
@@ -950,6 +959,92 @@ def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, n
             "compression": {k: r["party"][k] for k in ("gross", "net", "eliminated", "pct")},
             "savings": r["savings"],
         }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Demo controls (Phase B) — DEMO ONLY. Browser-driven cycle advance + reset so a
+# live demo needs no CLI. These force the EXISTING state machine / row ops on
+# demand; they are never normal user actions and must stay behind the Demo area.
+# ---------------------------------------------------------------------------
+
+# Transactional tables cleared on reset, in FK-safe order (children first).
+# Reference/identity data (networks, parties, party_networks, currencies) is kept.
+_RESET_TABLES = ("cycle_obligations", "net_positions", "canonical_invoices",
+                 "matches", "obligations", "upload_batches", "source_formats",
+                 "cycles", "counterparty_aliases", "audit_log")
+
+
+@app.post("/demo/advance")
+def demo_advance(network_id: int = 1):
+    """Drive the active cycle all the way forward NOW (no waiting for a cut-off):
+    OPEN→RECONCILING→LOCKED (freeze nettable set; roll deferred/unmatched into the
+    next cycle)→NETTED (write net_positions + statement)→CLOSED, leaving the next
+    cycle OPEN. DEMO ONLY."""
+    conn = get_conn()
+    try:
+        c = conn.execute(
+            "SELECT * FROM cycles WHERE network_id = ? AND state != 'closed' "
+            "ORDER BY sequence_no LIMIT 1", (network_id,)).fetchone()
+        if c is None:
+            c = cycles.ensure_open_cycle(conn, network_id)
+            conn.commit()
+        cycle_id = c["cycle_id"]
+        _require_audit_ok(conn)            # guard before advancing state
+        state = c["state"]
+        try:
+            if state == "open":
+                cycles.close_uploads(conn, cycle_id)
+                state = "reconciling"
+            if state == "reconciling":
+                cycles.lock(conn, cycle_id)
+                canonical.mint(conn)       # rolled obligations may move cycle
+                state = "locked"
+            if state == "locked":
+                locked = conn.execute("SELECT * FROM cycles WHERE cycle_id = ?",
+                                      (cycle_id,)).fetchone()
+                _net_and_persist(conn, locked)
+                conn.commit()
+                state = "netted"
+            if state == "netted":
+                cycles.close(conn, cycle_id)
+                state = "closed"
+        except netting.NettingInvariantError as e:
+            raise HTTPException(409, f"Netting invariant failed — advance blocked: {e}")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        nxt = cycles.ensure_open_cycle(conn, network_id)
+        conn.commit()
+        return {
+            "advanced_cycle_id": cycle_id,
+            "advanced": _project_cycle(conn, conn.execute(
+                "SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()),
+            "next_cycle": _project_cycle(conn, nxt),
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/demo/reset")
+def demo_reset(network_id: int = 1):
+    """Clear ALL transactional data and reopen a fresh cycle 1, keeping parties
+    and their identities/tax_ids intact. Returns the app to a clean baseline.
+    DEMO ONLY — destructive; never a normal user action."""
+    conn = get_conn()
+    try:
+        for table in _RESET_TABLES:
+            conn.execute(f"DELETE FROM {table}")
+        # Tables use plain INTEGER PRIMARY KEY (rowid), so once emptied the next
+        # insert restarts ids at 1 — no sqlite_sequence reset needed.
+        _demo_session["current_party_id"] = CURRENT_PARTY_ID
+        fresh = cycles.ensure_open_cycle(conn, network_id)
+        audit.append(conn, actor="operator", action="demo_reset",
+                     entity_ref=f"network:{network_id}",
+                     after={"open_cycle_id": fresh["cycle_id"]})
+        conn.commit()
+        return {"ok": True, "open_cycle": _project_cycle(conn, fresh),
+                "parties_kept": conn.execute("SELECT COUNT(*) FROM parties").fetchone()[0]}
     finally:
         conn.close()
 

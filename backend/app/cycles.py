@@ -233,6 +233,23 @@ def lock(conn, cycle_id):
     return frozen
 
 
+def close(conn, cycle_id):
+    """NETTED → CLOSED. Settlement is complete (demo: immediate); the next cycle
+    is already open (created at lock). Idempotently guarantees a next open cycle."""
+    c = conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
+    if c is None:
+        raise ValueError("Unknown cycle.")
+    if c["state"] != "netted":
+        raise ValueError(f"close requires a NETTED cycle (was '{c['state']}').")
+    ensure_open_cycle(conn, c["network_id"])
+    conn.execute("UPDATE cycles SET state = 'closed' WHERE cycle_id = ?", (cycle_id,))
+    audit.append(conn, actor="operator", action="cycle_close",
+                 entity_ref=f"cycle:{cycle_id}",
+                 before={"state": "netted"}, after={"state": "closed"})
+    conn.commit()
+    return conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
+
+
 def is_locked(conn, cycle_id):
     if not cycle_id:
         return False
