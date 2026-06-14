@@ -452,10 +452,10 @@
         <div class="hero-assume" id="stmt-assume"></div>
       </div>
 
-      <!-- AT-SCALE projection — clearly separate from this cycle's actuals -->
+      <!-- AT-SCALE projection — bottom-up from member figures, clearly separate -->
       <div class="stmt-projection" id="stmt-projection">
-        <span class="proj-tag">Projection · not this cycle</span>
-        <div class="proj-line">At ~<b id="proj-vol">—</b> cross-border payments/month, estimated fees + FX ≈ <b id="proj-total">—</b><span class="proj-per">/month</span></div>
+        <span class="proj-tag">Projection · based on member-interview figures, not this cycle</span>
+        <div class="proj-line">Across <b id="proj-members">—</b> active members: estimated <b id="proj-month">—</b><span class="proj-per">/month</span> &nbsp;·&nbsp; <b id="proj-year">—</b><span class="proj-per">/year</span></div>
         <div class="proj-break" id="proj-break"></div>
       </div>
 
@@ -845,12 +845,17 @@ async function loadStatement(){
   document.getElementById('stmt-settlements').textContent = n.net_settlements;
   document.getElementById('stmt-compressed').textContent = moneyList(held);
 
-  // At-scale projection — explicitly NOT this cycle's numbers.
-  const pr = d.projection;
-  document.getElementById('proj-vol').textContent = pr.monthly_volume.toLocaleString('en-US');
-  document.getElementById('proj-total').textContent = '€'+pr.monthly_total_major.toLocaleString('en-US');
+  // At-scale projection — bottom-up member figures × members, a RANGE.
+  const pr = d.projection, pm = pr.per_member;
+  const eur = v => '€'+Math.round(v).toLocaleString('en-US');
+  const range = (lo,hi) => `${eur(lo)}–${eur(hi)}`;
+  document.getElementById('proj-members').textContent = pr.active_members.toLocaleString('en-US');
+  document.getElementById('proj-month').textContent = range(pr.monthly_min_major, pr.monthly_max_major);
+  document.getElementById('proj-year').textContent = range(pr.annual_min_major, pr.annual_max_major);
   document.getElementById('proj-break').textContent =
-    `≈ fees €${(pr.monthly_fees_minor/100).toLocaleString('en-US')} + FX €${(pr.monthly_fx_minor/100).toLocaleString('en-US')} per month, at €${a.wire_fee_major}/payment and ${a.fx_rate_pct}% FX on a €${pr.avg_ticket_major.toLocaleString('en-US')} representative ticket. A forward projection, not this cycle's actuals.`;
+    `Bottom-up: ~${range(pm.total_min_major, pm.total_max_major)}/member/month ` +
+    `(fees ${range(pm.fee_min_major, pm.fee_max_major)} + FX ${range(pm.fx_min_major, pm.fx_max_major)}) × ${pr.active_members} members. ` +
+    `Member-interview figures — a forward projection, not this cycle's actuals.`;
 
   document.getElementById('stmt-assume').innerHTML =
     `<b>This cycle's benefit is value compression</b> — ${n.compression_pct}% of gross doesn't move. ` +

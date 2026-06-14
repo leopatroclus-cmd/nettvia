@@ -1005,9 +1005,16 @@ def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, n
 # ---------------------------------------------------------------------------
 
 # Adjustable assumptions, displayed on the statement so the numbers are defensible.
-WIRE_FEE_MAJOR_DEFAULT = 30.0    # € per international payment avoided
-FX_RATE_DEFAULT = 0.006          # 0.6% spread on cross-currency netted value
-MONTHLY_VOLUME_DEFAULT = 1000    # cross-border payments/month, for the at-scale projection
+WIRE_FEE_MAJOR_DEFAULT = 30.0    # € per international payment avoided (per-party figure)
+FX_RATE_DEFAULT = 0.006          # 0.6% spread on cross-currency netted value (per-party)
+
+# At-scale projection — grounded BOTTOM-UP in member-interview figures, NOT
+# extrapolated from the demo cycle. Per member/month: fee saving + FX saving.
+FEE_SAVING_MIN_DEFAULT = 100.0   # € / member / month (payment fees)
+FEE_SAVING_MAX_DEFAULT = 250.0
+FX_SAVING_MIN_DEFAULT = 300.0    # € / member / month (FX spread)
+FX_SAVING_MAX_DEFAULT = 600.0
+ACTIVE_MEMBERS_DEFAULT = 50      # configurable network member count
 
 
 def _money_list(conn, by_ccy):
@@ -1019,7 +1026,7 @@ def _money_list(conn, by_ccy):
     return out
 
 
-def _statement_summary(conn, cycle, wire_fee_minor, fx_rate, monthly_volume):
+def _statement_summary(conn, cycle, wire_fee_minor, fx_rate, projection_cfg):
     """Network headline + per-party breakdown for a cycle's netting set."""
     result = netting.compute(conn, cycle)           # guards Σnet=0 + reconstruction
     invoices, positions = result["invoices"], result["positions"]
@@ -1056,14 +1063,14 @@ def _statement_summary(conn, cycle, wire_fee_minor, fx_rate, monthly_volume):
     _, n_counts = netting.compression(invoices, positions)
     net_settlements = sum(n_counts.values())
 
-    # AT-SCALE projection (NOT this cycle's actuals): the addressable fee + FX
-    # cost flowing through cross-border payments at a configurable monthly
-    # volume, at the current assumptions. avg_ticket is this cycle's mean invoice
-    # value, used as a representative payment size for the FX leg.
-    avg_ticket = (total_gross // len(invoices)) if invoices else 0
-    proj_fees = monthly_volume * wire_fee_minor
-    proj_fx = int(monthly_volume * avg_ticket * fx_rate)
-    proj_total = proj_fees + proj_fx
+    # AT-SCALE projection (NOT this cycle's actuals) — built BOTTOM-UP from
+    # member-interview figures, never extrapolated from this cycle. Per member/
+    # month = a fee-saving range + an FX-saving range; network = per-member ×
+    # active members. Presented as a range, not a false-precise single figure.
+    cfg = projection_cfg
+    members = cfg["active_members"]
+    pm_min = cfg["fee_min"] + cfg["fx_min"]      # € per member / month, low
+    pm_max = cfg["fee_max"] + cfg["fx_max"]      # € per member / month, high
 
     # Per-party: invoices (with refs), gross AR/AP, net positions, payments, savings.
     by_party = {}   # party_id -> list of (role, ci)
@@ -1142,15 +1149,20 @@ def _statement_summary(conn, cycle, wire_fee_minor, fx_rate, monthly_volume):
             "compression_pct": compression_pct,
             "net_settlements": net_settlements,   # honest: one net settlement per netting party
         },
-        # Clearly separate from this cycle's actuals — a forward projection.
+        # Clearly separate from this cycle — a bottom-up projection from member
+        # figures, presented as a range. The cycle's own FX stays €0 (single ccy).
         "projection": {
-            "monthly_volume": monthly_volume,
-            "avg_ticket_minor": avg_ticket,
-            "avg_ticket_major": refdata.to_major(avg_ticket, 2),
-            "monthly_fees_minor": proj_fees,
-            "monthly_fx_minor": proj_fx,
-            "monthly_total_minor": proj_total,
-            "monthly_total_major": refdata.to_major(proj_total, 2),
+            "basis": "member-interview figures",
+            "active_members": members,
+            "per_member": {
+                "fee_min_major": cfg["fee_min"], "fee_max_major": cfg["fee_max"],
+                "fx_min_major": cfg["fx_min"], "fx_max_major": cfg["fx_max"],
+                "total_min_major": pm_min, "total_max_major": pm_max,
+            },
+            "monthly_min_major": pm_min * members,
+            "monthly_max_major": pm_max * members,
+            "annual_min_major": pm_min * members * 12,
+            "annual_max_major": pm_max * members * 12,
         },
         "parties": parties_out,
     }
@@ -1160,19 +1172,29 @@ def _statement_summary(conn, cycle, wire_fee_minor, fx_rate, monthly_volume):
 def statement_summary(cycle_id: int = None, network_id: int = 1,
                       wire_fee: float = WIRE_FEE_MAJOR_DEFAULT,
                       fx_rate: float = FX_RATE_DEFAULT,
-                      monthly_volume: int = MONTHLY_VOLUME_DEFAULT):
+                      fee_saving_min: float = FEE_SAVING_MIN_DEFAULT,
+                      fee_saving_max: float = FEE_SAVING_MAX_DEFAULT,
+                      fx_saving_min: float = FX_SAVING_MIN_DEFAULT,
+                      fx_saving_max: float = FX_SAVING_MAX_DEFAULT,
+                      active_members: int = ACTIVE_MEMBERS_DEFAULT):
     """Presentation-grade cycle statement: value-compression headline + per-party
-    detail + a clearly-separated at-scale projection. Assumptions (wire_fee €,
-    fx_rate, monthly_volume) are adjustable and echoed back; nothing is exact."""
+    detail + a clearly-separated, bottom-up at-scale projection. The projection
+    is built from per-member fee/FX saving ranges × active members (all
+    adjustable, echoed back); nothing is presented as exact."""
     conn = get_conn()
     try:
         _require_audit_ok(conn)
         cycle = _active_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No cycle.")
+        projection_cfg = {
+            "fee_min": fee_saving_min, "fee_max": fee_saving_max,
+            "fx_min": fx_saving_min, "fx_max": fx_saving_max,
+            "active_members": active_members,
+        }
         try:
             return _statement_summary(conn, cycle, int(round(wire_fee * 100)),
-                                      fx_rate, monthly_volume)
+                                      fx_rate, projection_cfg)
         except netting.NettingInvariantError as e:
             raise HTTPException(409, f"Netting invariant failed — statement blocked: {e}")
     finally:

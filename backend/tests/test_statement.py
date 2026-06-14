@@ -78,13 +78,19 @@ def test_eur_ring_statement_math(client, conn):
     assert s["assumptions"]["wire_fee_major"] == 30.0
     assert s["assumptions"]["fx_rate_pct"] == 0.6
 
-    # AT-SCALE projection (separate from this cycle): fees + FX at monthly volume.
+    # AT-SCALE projection: bottom-up from member figures × members, a RANGE,
+    # with NO FX extrapolated from this zero-FX cycle.
     proj = s["projection"]
-    assert proj["monthly_volume"] == 1000
-    assert proj["monthly_fees_minor"] == 1000 * 3000            # volume × €30
-    assert proj["avg_ticket_minor"] == 5310000 // 8             # cycle mean ticket
-    assert proj["monthly_fx_minor"] == int(1000 * (5310000 // 8) * 0.006)
-    assert proj["monthly_total_minor"] == proj["monthly_fees_minor"] + proj["monthly_fx_minor"]
+    assert proj["active_members"] == 50
+    pm = proj["per_member"]
+    assert pm["total_min_major"] == 100 + 300        # fee_min + fx_min = €400
+    assert pm["total_max_major"] == 250 + 600        # fee_max + fx_max = €850
+    assert proj["monthly_min_major"] == 400 * 50     # €20,000
+    assert proj["monthly_max_major"] == 850 * 50     # €42,500
+    assert proj["annual_min_major"] == 400 * 50 * 12
+    # The ring's own cross-cycle FX is zero — projection FX comes only from the
+    # member figures, never from the cycle ticket.
+    assert "avg_ticket_major" not in proj and "monthly_fx_minor" not in proj
 
     # Per-party detail: invoices listed, payments N → 1 (honest at party level),
     # one-fewer-movement saving = (n − 1) × fee.
@@ -98,12 +104,16 @@ def test_eur_ring_statement_math(client, conn):
 
 
 def test_summary_assumptions_adjustable(client):
-    """Wire fee, FX rate, and monthly volume are adjustable per request and
-    drive the at-scale projection."""
+    """Per-party assumptions and the projection's member figures are adjustable
+    per request and drive the outputs."""
     client.post("/demo/advance")               # net the seeded cycle
-    s = client.get("/statement/summary",
-                   params={"wire_fee": 50, "fx_rate": 0.01, "monthly_volume": 2000}).json()
+    s = client.get("/statement/summary", params={
+        "wire_fee": 50, "fx_rate": 0.01,
+        "fee_saving_min": 150, "fee_saving_max": 300,
+        "fx_saving_min": 400, "fx_saving_max": 700, "active_members": 80}).json()
     assert s["assumptions"]["wire_fee_major"] == 50.0
     assert s["assumptions"]["fx_rate_pct"] == 1.0
-    assert s["projection"]["monthly_volume"] == 2000
-    assert s["projection"]["monthly_fees_minor"] == 2000 * 5000   # 2000 × €50
+    proj = s["projection"]
+    assert proj["active_members"] == 80
+    assert proj["per_member"]["total_min_major"] == 150 + 400        # €550
+    assert proj["monthly_max_major"] == (300 + 700) * 80             # €80,000
