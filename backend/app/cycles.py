@@ -141,6 +141,50 @@ def current_open_cycle(conn, network_id):
     ).fetchone()
 
 
+def working_cycle(conn, network_id):
+    """The ONE cycle currently being worked. The invariant is a single non-closed
+    cycle, but to stay robust to stray non-closed litter we resolve deterministically:
+    the LATEST-sequence non-closed cycle that HOLDS obligations (real working data);
+    if none hold any, the latest-sequence non-closed cycle (a fresh empty one). Never
+    the earliest — a stale lower-sequence non-closed cycle can never hijack the view."""
+    rows = conn.execute(
+        "SELECT * FROM cycles WHERE network_id = ? AND state != 'closed' "
+        "ORDER BY sequence_no", (network_id,)).fetchall()
+    if not rows:
+        return None
+    with_obl = [c for c in rows if conn.execute(
+        "SELECT 1 FROM obligations WHERE assigned_cycle_id = ? LIMIT 1",
+        (c["cycle_id"],)).fetchone()]
+    return with_obl[-1] if with_obl else rows[-1]
+
+
+def reconcile_orphans(conn, network_id):
+    """Startup hygiene (robust to existing prod litter): close stray non-closed
+    cycles that hold ZERO obligations, while always keeping one non-closed cycle as
+    the working cycle. Collapses leftover empty cycles (older code / abandoned runs)
+    so resolution sees a single working cycle. Returns how many were closed."""
+    non_closed = [r["cycle_id"] for r in conn.execute(
+        "SELECT cycle_id FROM cycles WHERE network_id = ? AND state != 'closed' "
+        "ORDER BY sequence_no", (network_id,))]
+    if len(non_closed) <= 1:
+        return 0
+    empties = [cid for cid in non_closed if conn.execute(
+        "SELECT 1 FROM obligations WHERE assigned_cycle_id = ? LIMIT 1", (cid,)).fetchone() is None]
+    # If EVERY non-closed cycle is empty, keep the latest as the working cycle.
+    keep = non_closed[-1] if len(empties) == len(non_closed) else None
+    closed = 0
+    for cid in empties:
+        if cid == keep:
+            continue
+        conn.execute("UPDATE cycles SET state = 'closed' WHERE cycle_id = ?", (cid,))
+        closed += 1
+    if closed:
+        audit.append(conn, actor="system", action="cycle_reconcile",
+                     entity_ref=f"network:{network_id}", after={"closed_orphans": closed})
+        conn.commit()
+    return closed
+
+
 def ensure_open_cycle(conn, network_id):
     """Guarantee a network always has exactly one OPEN cycle for new uploads."""
     c = current_open_cycle(conn, network_id)

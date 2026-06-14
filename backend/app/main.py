@@ -50,6 +50,11 @@ app = FastAPI(title="Netting MVP API", version="0.1.0")
 @app.on_event("startup")
 def _startup():
     init_db()   # seeds only when empty; never resets an existing DB
+    conn = get_conn()
+    try:
+        cycles.reconcile_orphans(conn, 1)   # collapse leftover empty non-closed cycles
+    finally:
+        conn.close()
 
 
 def _fmt_date(iso):
@@ -116,12 +121,12 @@ def _open_cycle_obligations(conn, party_id, network_id):
     cycle, while rolled rows have already moved into the next (now-active) cycle.
     Using the working cycle (not the freshly-opened next one) keeps the view from
     emptying prematurely at Close uploads."""
-    ac = _active_cycle(conn, network_id)
-    if ac is None:
+    wc = _working_cycle(conn, network_id)
+    if wc is None:
         return []
     return conn.execute(
         "SELECT * FROM obligations WHERE owner_party_id = ? AND assigned_cycle_id = ? "
-        "ORDER BY obligation_id", (party_id, ac["cycle_id"])).fetchall()
+        "ORDER BY obligation_id", (party_id, wc["cycle_id"])).fetchall()
 
 
 @app.get("/obligations")
@@ -446,9 +451,17 @@ def confirm_upload(batch_id: int, payload: dict = Body(default=None)):
                 (party_id, signature, json.dumps(mapping_dict)),
             )
 
-        # New obligations enter the network's currently OPEN cycle. After
-        # close-uploads this is the next cycle, so late uploads route there.
-        open_cycle = cycles.ensure_open_cycle(conn, 1)["cycle_id"]
+        # New obligations enter the single working cycle — but ONLY while it's still
+        # open. After the cut-off (reconciling/locked) we reject rather than spawn a
+        # second non-closed cycle (which would split the active view). Run netting
+        # opens the next cycle for further uploads.
+        wc = _working_cycle(conn, 1)
+        if wc is None or wc["state"] != "open":
+            state = wc["state"] if wc else "none"
+            raise HTTPException(
+                409, f"Uploads are closed for the current cycle (it's {state}). "
+                     f"Run netting to settle it and open the next cycle.")
+        open_cycle = wc["cycle_id"]
 
         rows = json.loads(batch["raw_rows"])
         evaluated = _evaluate_batch(conn, rows, mapping_dict)
@@ -772,14 +785,12 @@ def list_cycles(network_id: int = 1):
 
 @app.get("/cycles/current")
 def current_cycle(network_id: int = 1):
-    """The cycle the Netting screen tracks: the earliest not-yet-closed cycle
-    (so it shows one cycle through Open → Reconciling → Locked)."""
+    """The cycle the Netting screen tracks and the lifecycle buttons act on: the
+    single working (non-closed) cycle, resolved robustly so stray litter can't
+    hijack it."""
     conn = get_conn()
     try:
-        c = conn.execute(
-            "SELECT * FROM cycles WHERE network_id = ? AND state != 'closed' "
-            "ORDER BY sequence_no LIMIT 1", (network_id,)
-        ).fetchone()
+        c = _working_cycle(conn, network_id)
         if c is None:
             raise HTTPException(404, "No active cycle.")
         return _project_cycle(conn, c)
@@ -847,26 +858,28 @@ def _days_to(iso):
     return max(0, (date.fromisoformat(iso) - date.today()).days)
 
 
-def _active_cycle(conn, network_id, cycle_id=None):
+def _working_cycle(conn, network_id, cycle_id=None):
+    """The single non-closed cycle being worked — drives Accounts, /cycles/current
+    and the lifecycle buttons. Resolved deterministically (latest non-closed holding
+    obligations, never the earliest) so stray litter can't hijack the view."""
     if cycle_id:
         return conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
-    return conn.execute(
-        "SELECT * FROM cycles WHERE network_id = ? AND state != 'closed' "
-        "ORDER BY sequence_no LIMIT 1", (network_id,)).fetchone()
+    return cycles.working_cycle(conn, network_id)
 
 
-def _statement_cycle(conn, network_id, cycle_id=None):
-    """Cycle the default statement should show. Prefer the most recent FINALIZED
-    cycle (one with persisted net_positions) so the statement never reads the
-    freshly-opened, empty next cycle (a '0 gross' statement). Before any cycle
-    has netted, fall back to the active working cycle for a provisional view."""
+def _focus_cycle(conn, network_id, cycle_id=None):
+    """Cycle the Netting reveal AND the default statement show. Prefer the most
+    recent FINALIZED cycle (persisted net_positions) so that after Run netting both
+    stay on the JUST-SETTLED closed cycle (its real compression number) instead of
+    snapping to the freshly-opened empty cycle. Before anything has netted, fall back
+    to the working cycle for a provisional view."""
     if cycle_id:
         return conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
     finalized = conn.execute(
         "SELECT c.* FROM cycles c WHERE c.network_id = ? AND EXISTS "
         "(SELECT 1 FROM net_positions np WHERE np.cycle_id = c.cycle_id) "
         "ORDER BY c.sequence_no DESC LIMIT 1", (network_id,)).fetchone()
-    return finalized or _active_cycle(conn, network_id)
+    return finalized or _working_cycle(conn, network_id)
 
 
 def _netting_response(conn, cycle, party_id):
@@ -925,12 +938,15 @@ def _netting_response(conn, cycle, party_id):
 
 
 @app.get("/netting")
-def get_netting(party_id: int = Depends(current_party_id), network_id: int = 1):
-    """Netting result (regenerable) for the active cycle — provisional until lock."""
+def get_netting(party_id: int = Depends(current_party_id), network_id: int = 1,
+                cycle_id: int = None):
+    """Netting reveal (regenerable). Defaults to the FOCUS cycle: provisional while
+    a cycle is being worked, and the just-settled cycle right after Run netting (it
+    does not snap to the new empty cycle). An explicit cycle_id pins a specific one."""
     conn = get_conn()
     try:
         _require_audit_ok(conn)
-        cycle = _active_cycle(conn, network_id)
+        cycle = _focus_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No active cycle.")
         return _netting_response(conn, cycle, party_id)
@@ -1001,7 +1017,7 @@ def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, n
     conn = get_conn()
     try:
         _require_audit_ok(conn)
-        cycle = _active_cycle(conn, network_id, cycle_id)
+        cycle = _focus_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No cycle.")
         try:
@@ -1207,7 +1223,7 @@ def statement_summary(cycle_id: int = None, network_id: int = 1,
     conn = get_conn()
     try:
         _require_audit_ok(conn)
-        cycle = _statement_cycle(conn, network_id, cycle_id)
+        cycle = _focus_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No cycle.")
         projection_cfg = {
@@ -1245,9 +1261,7 @@ def demo_advance(network_id: int = 1):
     cycle OPEN. DEMO ONLY."""
     conn = get_conn()
     try:
-        c = conn.execute(
-            "SELECT * FROM cycles WHERE network_id = ? AND state != 'closed' "
-            "ORDER BY sequence_no LIMIT 1", (network_id,)).fetchone()
+        c = _working_cycle(conn, network_id)
         if c is None:
             c = cycles.ensure_open_cycle(conn, network_id)
             conn.commit()

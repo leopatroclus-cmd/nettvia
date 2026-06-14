@@ -961,6 +961,7 @@ function go(v){
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===v));
   document.querySelectorAll('.view').forEach(s=>s.classList.add('hidden'));
   document.getElementById('view-'+v).classList.remove('hidden');
+  if(v==='accounts'){ loadObligations(); }   // always re-fetch the working cycle's set
   if(v==='netting'){ loadCycle(); loadNetting(); }
   if(v==='statement'){ loadStatement(pendingStatementCycle); pendingStatementCycle = null; }
   if(v==='history'){ loadHistory(); }
