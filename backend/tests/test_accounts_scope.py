@@ -100,15 +100,20 @@ def test_all_netted_open_view_empty_for_every_party(client, conn):
         "SELECT COUNT(*) FROM obligations WHERE assigned_cycle_id=1").fetchone()[0] == 6
 
 
-def test_accepted_net_but_unmatched_does_not_roll(client, conn):
-    """Accept&net on a pair that isn't a confirmed nettable match must NOT roll
-    into the new open cycle (the reported bug) — it stays in the closing cycle."""
+def test_accepted_net_but_unmatched_rolls_and_stays_active(client, conn):
+    """Accept&net on a pair that isn't a confirmed nettable match ROLLS into the
+    next cycle and stays ACTIVE — it gets another netting attempt rather than
+    being settled out (the active view follows the new working cycle)."""
     client.post("/demo/reset")
     _accept_net_pair(conn, "U-1", 1, 2, 7000, matched=False)   # accepted net, unmatched
 
     client.post("/demo/advance")
 
-    assert client.get("/obligations").json() == []             # left the open view
     open_id = conn.execute("SELECT cycle_id FROM cycles WHERE state='open'").fetchone()[0]
+    oid = conn.execute(
+        "SELECT obligation_id FROM obligations WHERE invoice_number='U-1' AND owner_party_id=1"
+    ).fetchone()[0]
+    # Rolled into the new (now-active) cycle and still visible in the active view.
     assert conn.execute(
-        "SELECT COUNT(*) FROM obligations WHERE assigned_cycle_id=?", (open_id,)).fetchone()[0] == 0
+        "SELECT assigned_cycle_id FROM obligations WHERE obligation_id=?", (oid,)).fetchone()[0] == open_id
+    assert oid in {o["id"] for o in client.get("/obligations").json()}

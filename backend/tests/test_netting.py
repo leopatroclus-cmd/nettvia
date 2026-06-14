@@ -48,4 +48,6 @@ def test_netting_over_locked_snapshot_matches_provisional(client, conn):
     client.post("/cycles/1/lock")
     final = {p["currency"]: p["net_minor"] for p in client.post("/cycles/1/net").json()["party"]["positions"]}
     assert provisional == final
-    assert conn.execute("SELECT state FROM cycles WHERE cycle_id=1").fetchone()[0] == "netted"
+    # Run netting closes the cycle (settles it) and opens the next.
+    assert conn.execute("SELECT state FROM cycles WHERE cycle_id=1").fetchone()[0] == "closed"
+    assert conn.execute("SELECT COUNT(*) FROM cycles WHERE state='open'").fetchone()[0] == 1

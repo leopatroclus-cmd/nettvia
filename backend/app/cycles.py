@@ -218,14 +218,16 @@ def lock(conn, cycle_id):
                 "frozen_currency) VALUES (?,?,?,?)",
                 (cycle_id, o["obligation_id"], o["amount"], o["currency"]))
             frozen += 1
-        elif code in ("defer", "dispute"):     # long-dated / contested → roll forward
+        elif code in ("defer", "dispute", "net"):
+            # defer (long-dated), dispute (contested), and net-but-not-nettable
+            # (accepted to net but no confirmed nettable pair this cycle) all ROLL
+            # into the next cycle and stay active — net-not-nettable gets another
+            # netting attempt next cycle rather than being stranded.
             conn.execute(
                 "UPDATE obligations SET assigned_cycle_id = ? WHERE obligation_id = ?",
                 (nxt["cycle_id"], o["obligation_id"]))
-        # 'net' (accepted to net — frozen above when nettable; otherwise the party
-        # acted on it this cycle, so it stays in the CLOSING cycle and does NOT
-        # roll) and 'direct' (settled outside netting) both remain here. Net is
-        # never rolled, so accept & net always clears the open Accounts view.
+        # 'direct' (settled outside netting) is settled this cycle → it remains in
+        # the closing cycle and leaves the active view when the cycle closes.
 
     conn.execute("UPDATE cycles SET state = 'locked' WHERE cycle_id = ?", (cycle_id,))
     audit.append(conn, actor="operator", action="cycle_lock",

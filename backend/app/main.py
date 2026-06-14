@@ -109,15 +109,19 @@ def _project(row, conn):
 
 
 def _open_cycle_obligations(conn, party_id, network_id):
-    """The current party's obligations in the network's OPEN cycle (the Accounts
-    working set). Netted rows live in their now-closed cycle; rolled rows have
-    moved into this open cycle — so this naturally shows only the live set."""
-    oc = cycles.current_open_cycle(conn, network_id)
-    if oc is None:
+    """The current party's obligations in the ACTIVE (earliest non-closed) cycle
+    — the one being worked through its lifecycle (open → reconciling → locked).
+    Obligations stay here while the cycle is processed and leave only when it
+    CLOSES at Run netting: netted/settle-direct rows settle into the now-closed
+    cycle, while rolled rows have already moved into the next (now-active) cycle.
+    Using the working cycle (not the freshly-opened next one) keeps the view from
+    emptying prematurely at Close uploads."""
+    ac = _active_cycle(conn, network_id)
+    if ac is None:
         return []
     return conn.execute(
         "SELECT * FROM obligations WHERE owner_party_id = ? AND assigned_cycle_id = ? "
-        "ORDER BY obligation_id", (party_id, oc["cycle_id"])).fetchall()
+        "ORDER BY obligation_id", (party_id, ac["cycle_id"])).fetchall()
 
 
 @app.get("/obligations")
@@ -950,8 +954,10 @@ def _net_and_persist(conn, cycle):
 
 @app.post("/cycles/{cycle_id}/net")
 def run_netting(cycle_id: int, party_id: int = Depends(current_party_id)):
-    """LOCKED → NETTED: compute net positions over the snapshot and persist them
-    as a (regenerable) projection / statement record."""
+    """LOCKED → NETTED → CLOSED: compute net positions over the snapshot, persist
+    them as the (regenerable) statement, then CLOSE the cycle and open the next.
+    Closing is what settles the netted/settle-direct obligations out of the active
+    Accounts view (they live on in the now-closed cycle's statement / history)."""
     conn = get_conn()
     try:
         cycle = conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
@@ -961,10 +967,10 @@ def run_netting(cycle_id: int, party_id: int = Depends(current_party_id)):
             raise HTTPException(409, f"Netting requires a LOCKED cycle (was '{cycle['state']}').")
         _require_audit_ok(conn)            # guard before advancing state
         try:
-            _net_and_persist(conn, cycle)
+            _net_and_persist(conn, cycle)  # → netted (uncommitted)
+            cycles.close(conn, cycle_id)   # → closed + opens the next cycle (commits)
         except netting.NettingInvariantError as e:
             raise HTTPException(409, f"Netting invariant failed — cycle not netted: {e}")
-        conn.commit()
         return _netting_response(conn,
                                  conn.execute("SELECT * FROM cycles WHERE cycle_id = ?",
                                               (cycle_id,)).fetchone(), party_id)

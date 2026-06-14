@@ -306,6 +306,7 @@
       <div class="nav-item active" data-view="accounts"><span class="dot"></span>Accounts</div>
       <div class="nav-item" data-view="netting"><span class="dot"></span>Netting</div>
       <div class="nav-item" data-view="statement"><span class="dot"></span>Statement</div>
+      <div class="nav-item" data-view="history"><span class="dot"></span>History</div>
     </nav>
     <div class="side-foot">Signed in as<br><b id="side-party">Aegean Air Cargo S.A.</b><br><span id="side-loc">Athens · GR</span></div>
   </aside>
@@ -462,6 +463,20 @@
       <h2 class="stmt-h2">Per party</h2>
       <div class="stmt-cards" id="stmt-parties-cards"></div>
       <p class="hint" id="stmt-foot" style="margin-top:14px"></p>
+    </section>
+
+    <!-- ============ HISTORY (closed-cycle archive) ============ -->
+    <section class="view hidden" id="view-history">
+      <h1>History</h1>
+      <p class="lede">Settled cycles. Each closed cycle keeps its netted invoices and statement — this is the archive.</p>
+      <div class="card">
+        <table>
+          <thead><tr>
+            <th>Cycle</th><th>Stage</th><th class="r">Netted invoices</th><th>Settles</th><th></th>
+          </tr></thead>
+          <tbody id="history-body"></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ============ PARTNERS ============ -->
@@ -625,6 +640,7 @@ function refreshAll(){
   const v = active && active.dataset.view;
   if(v==='netting'){ loadCycle(); loadNetting(); }
   if(v==='statement'){ loadStatement(); }
+  if(v==='history'){ loadHistory(); }
 }
 
 async function loadDemoSession(){
@@ -813,14 +829,14 @@ document.getElementById('cpp').addEventListener('input', recalcSavings);
 /* ---------- statement (presentation-grade cycle reveal) ---------- */
 const moneyList = a => (a && a.length) ? a.map(m=>fmt(m.major, m.currency)).join('  ·  ') : '€0';
 
-async function loadStatement(){
+async function loadStatement(cycleId){
   let d;
   try{
-    const res = await fetch('/statement/summary');
+    const res = await fetch('/statement/summary' + (cycleId ? '?cycle_id='+cycleId : ''));
     if(!res.ok) throw new Error('HTTP '+res.status);
     d = await res.json();
   }catch(e){
-    document.getElementById('stmt-sub').textContent = 'No netted cycle yet — run “Advance cycle” to produce a statement.';
+    document.getElementById('stmt-sub').textContent = 'No netted cycle yet — close uploads, lock, then run netting to produce a statement.';
     document.getElementById('stmt-parties-cards').innerHTML = '';
     return;
   }
@@ -885,6 +901,30 @@ async function loadStatement(){
     'Net positions sum to zero per currency by construction. Balances are per-currency — no FX consolidation in the headline.';
 }
 
+/* ---------- history (closed-cycle archive) ---------- */
+async function loadHistory(){
+  let cycles;
+  try{
+    const res = await fetch('/cycles');
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    cycles = await res.json();
+  }catch(e){ return; }
+  const closed = cycles.filter(c=> c.state==='closed' || c.state==='netted').reverse();
+  const body = document.getElementById('history-body');
+  if(!closed.length){
+    body.innerHTML = '<tr><td colspan="5" class="hint" style="padding:14px">No settled cycles yet — run a cycle through to Run netting.</td></tr>';
+    return;
+  }
+  body.innerHTML = closed.map(c=>`
+    <tr>
+      <td class="cp">${esc(c.label)}<span class="meta">cycle ${c.sequence_no}</span></td>
+      <td><span class="pbadge">${esc(c.phase)}</span></td>
+      <td class="amt">${c.frozen_count}</td>
+      <td class="num">${esc(c.milestones[3].date||'—')}</td>
+      <td class="r"><button class="p-edit" onclick="showStatement(${c.cycle_id})">View statement</button></td>
+    </tr>`).join('');
+}
+
 /* ---------- cycle timeline (staged deadlines + phase) ---------- */
 async function loadCycle(){
   try{
@@ -909,16 +949,21 @@ async function cycleAction(id, action){
     const res = await fetch(`/cycles/${id}/${action}`, {method:'POST'});
     if(!res.ok){ const e = await res.json().catch(()=>({})); throw new Error(e.detail||('HTTP '+res.status)); }
     await loadCycle(); await loadNetting(); await loadObligations();
+    // Run netting closes the cycle and settles it — show its statement.
+    if(action==='net'){ showStatement(id); }
   }catch(e){ alert('Cycle action failed: '+e.message); }
 }
 
 /* ---------- nav ---------- */
+let pendingStatementCycle = null;
+function showStatement(cycleId){ pendingStatementCycle = cycleId; go('statement'); }
 function go(v){
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view===v));
   document.querySelectorAll('.view').forEach(s=>s.classList.add('hidden'));
   document.getElementById('view-'+v).classList.remove('hidden');
   if(v==='netting'){ loadCycle(); loadNetting(); }
-  if(v==='statement'){ loadStatement(); }
+  if(v==='statement'){ loadStatement(pendingStatementCycle); pendingStatementCycle = null; }
+  if(v==='history'){ loadHistory(); }
   if(v==='partners'){ loadPartners(); }
   window.scrollTo({top:0});
 }
