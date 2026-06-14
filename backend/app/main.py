@@ -294,9 +294,12 @@ def _resolve_batch(conn, party_id, rows, mapping_dict):
         "WHERE owner_party_id = ? AND counterparty_party_id IS NULL "
         "AND counterparty_raw IS NOT NULL", (party_id,))]
     resolved = 0
+    batch_decisions = {}   # normalized name -> party already resolved this batch
     for name in names:
         sig = signals.get(name, {})
-        res = resolve.resolve(conn, name, sig)
+        res = resolve.resolve(conn, name, sig, batch_decisions)
+        if res["party_id"]:
+            batch_decisions[resolve.normalize_name(name)] = res["party_id"]
         if res["status"] == "confirmed":
             _apply_resolution(conn, name, res["party_id"], party_id, res["confidence"], sig)
             resolved += 1

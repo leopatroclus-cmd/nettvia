@@ -1,0 +1,9 @@
+Doc No,Trading Partner,Gross Amount,Ccy,Invoice Date,Maturity,Ledger Type,Doc Status,PO Ref
+AEG-3101,Skyline Freight GmbH,"14,200.00",EUR,2026-06-09,2026-06-30,Purchase,Open,PO-8801
+AEG-3102,Pacific Forwarders Ltd,"7,450.00",USD,2026-06-10,2026-07-02,Sales,Open,PO-8802
+AEG-3103,Pacific Forwarders Limited,"3,180.00",USD,2026-06-10,2026-07-02,Purchase,Open,PO-8803
+AEG-3104,Helvetia Air AG,"5,900.00",CHF,2026-06-11,2026-06-29,Sales,Open,PO-8804
+AEG-3105,Levant Cargo Co,"6,300.00",EUR,2026-06-11,2026-08-25,Purchase,Open,PO-8805
+AEG-3106,Nile Logistics,"4,750.00",EUR,2026-06-12,2026-06-26,Sales,Open,PO-8806
+AEG-3107,Adriatic Shipping,"2,980.00",EUR,2026-06-12,2026-06-24,Purchase,Open,PO-8807
+AEG-3108,Baltic Freight Lines,"8,100.00",EUR,2026-06-13,2026-07-03,Sales,Open,PO-8808
