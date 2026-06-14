@@ -108,17 +108,52 @@ def _project(row, conn):
     }
 
 
+def _open_cycle_obligations(conn, party_id, network_id):
+    """The current party's obligations in the network's OPEN cycle (the Accounts
+    working set). Netted rows live in their now-closed cycle; rolled rows have
+    moved into this open cycle — so this naturally shows only the live set."""
+    oc = cycles.current_open_cycle(conn, network_id)
+    if oc is None:
+        return []
+    return conn.execute(
+        "SELECT * FROM obligations WHERE owner_party_id = ? AND assigned_cycle_id = ? "
+        "ORDER BY obligation_id", (party_id, oc["cycle_id"])).fetchall()
+
+
 @app.get("/obligations")
-def get_obligations(party_id: int = Depends(current_party_id)):
-    """Obligations owned by the signed-in party, in the prototype's shape."""
+def get_obligations(party_id: int = Depends(current_party_id), network_id: int = 1):
+    """The signed-in party's obligations in the OPEN cycle, in the prototype's
+    shape. Scoped to the open cycle so netted invoices drop out after advance and
+    rolled-forward ones appear here."""
     conn = get_conn()
     try:
-        rows = conn.execute(
-            "SELECT * FROM obligations WHERE owner_party_id = ? "
-            "ORDER BY obligation_id",
-            (party_id,),
-        ).fetchall()
-        return [_project(r, conn) for r in rows]
+        return [_project(r, conn) for r in _open_cycle_obligations(conn, party_id, network_id)]
+    finally:
+        conn.close()
+
+
+@app.get("/accounts/metrics")
+def accounts_metrics(party_id: int = Depends(current_party_id), network_id: int = 1):
+    """Accounts metric cards, COMPUTED from the same open-cycle set (never static):
+    gross AR / AP per currency, pending (awaiting disposition), needs-attention
+    (mismatches + disputes). An empty cycle yields all zeros."""
+    conn = get_conn()
+    try:
+        rows = _open_cycle_obligations(conn, party_id, network_id)
+        ar, ap, pending, attention = {}, {}, 0, 0
+        for r in rows:
+            bucket = ar if r["direction"] == "AR" else ap
+            bucket[r["currency"]] = bucket.get(r["currency"], 0) + r["amount"]
+            if r["disposition"] == "pending":
+                pending += 1
+            if cycles.match_state(conn, r) == "mismatch" or r["disposition"] == "disputed":
+                attention += 1
+        return {
+            "gross_receivable": _money_list(conn, ar),
+            "gross_payable": _money_list(conn, ap),
+            "pending": pending,
+            "needs_attention": attention,
+        }
     finally:
         conn.close()
 

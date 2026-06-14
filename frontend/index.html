@@ -325,10 +325,10 @@
       <p class="lede">Your AP/AR for the open cycle. Decide what each invoice does — net it, settle it directly, defer it, or dispute it.</p>
 
       <div class="metrics">
-        <div class="metric"><div class="k">Gross receivable</div><div class="v">€33,650 <small>+ $9,800</small></div></div>
-        <div class="metric"><div class="k">Gross payable</div><div class="v">€29,350 <small>+ $4,100</small></div></div>
-        <div class="metric"><div class="k">Pending</div><div class="v">9 <small>invoices</small></div></div>
-        <div class="metric warn"><div class="k">Needs attention</div><div class="v">2</div></div>
+        <div class="metric"><div class="k">Gross receivable</div><div class="v" id="m-ar">€0</div></div>
+        <div class="metric"><div class="k">Gross payable</div><div class="v" id="m-ap">€0</div></div>
+        <div class="metric"><div class="k">Pending</div><div class="v"><span id="m-pending">0</span> <small>invoices</small></div></div>
+        <div class="metric warn"><div class="k">Needs attention</div><div class="v" id="m-attention">0</div></div>
       </div>
 
       <div class="toolbar">
@@ -1007,6 +1007,26 @@ async function loadObligations(){
     console.error('Failed to load obligations from API', e);
   }
   render();
+  loadMetrics();
+}
+
+// Accounts metric cards — computed live from the open-cycle set (never static).
+function moneyMain(list){
+  if(!list || !list.length) return '€0';
+  const main = fmt(list[0].major, list[0].currency);
+  const rest = list.slice(1).map(x=>fmt(x.major, x.currency)).join(' ');
+  return rest ? `${main} <small>+ ${rest}</small>` : main;
+}
+async function loadMetrics(){
+  try{
+    const res = await fetch('/accounts/metrics');
+    if(!res.ok) return;
+    const m = await res.json();
+    document.getElementById('m-ar').innerHTML = moneyMain(m.gross_receivable);
+    document.getElementById('m-ap').innerHTML = moneyMain(m.gross_payable);
+    document.getElementById('m-pending').textContent = m.pending;
+    document.getElementById('m-attention').textContent = m.needs_attention;
+  }catch(e){ /* leave cards as-is */ }
 }
 loadDemoSession(); loadObligations(); loadCycle(); loadNetting(); loadPartners();
 </script>
