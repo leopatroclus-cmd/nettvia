@@ -184,6 +184,28 @@
   .pbadge.on{color:var(--net); background:var(--net-soft); border-color:var(--net-line);}
   .pbadge.off{color:var(--muted); background:#f2f4f1;}
   .baltype{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em;}
+  .cp .tax{display:block; font-family:var(--mono); font-size:11.5px; color:var(--ink-soft); margin-top:2px;}
+  .cp .tax.empty{color:var(--muted);}
+  .cp .tax .tlab{color:var(--muted); letter-spacing:.04em;}
+  .p-edit{font:inherit; font-size:12px; padding:5px 11px; border-radius:7px; border:1px solid var(--line); background:var(--surface); cursor:pointer;}
+
+  /* ---------- edit-partner modal ---------- */
+  .modal-back{position:fixed; inset:0; background:rgba(20,28,22,.42); display:none; align-items:center; justify-content:center; z-index:50;}
+  .modal-back.show{display:flex;}
+  .modal{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:22px 24px; width:min(440px,92vw); box-shadow:0 18px 50px rgba(0,0,0,.18);}
+  .modal h3{margin:0 0 2px; font-size:15px;}
+  .modal p.sub{margin:0 0 16px; color:var(--muted); font-size:12.5px;}
+  .modal label{display:block; font-size:12px; color:var(--ink-soft); margin:12px 0 4px;}
+  .modal input{width:100%; font:inherit; font-size:13px; padding:9px 11px; border:1px solid var(--line); border-radius:9px; box-sizing:border-box;}
+  .modal input.mono{font-family:var(--mono);}
+  .modal .ro{font-size:12px; color:var(--muted); margin-top:14px;}
+  .modal .ro b{color:var(--ink-soft);}
+  .modal .err{display:none; margin-top:14px; padding:9px 12px; border-radius:9px; background:#fbecec; border:1px solid #e7c4c4; color:#9a3434; font-size:12.5px;}
+  .modal .err.show{display:block;}
+  .modal .acts{display:flex; justify-content:flex-end; gap:8px; margin-top:20px;}
+  .modal .acts button{font:inherit; font-size:13px; padding:9px 16px; border-radius:9px; cursor:pointer;}
+  .modal .acts .save{border:0; background:var(--ink); color:#fff;}
+  .modal .acts .cancel{border:1px solid var(--line); background:var(--surface); color:var(--ink-soft);}
 
   /* ---------- upload ---------- */
   .drop{
@@ -335,24 +357,40 @@
     <!-- ============ PARTNERS ============ -->
     <section class="view hidden" id="view-partners">
       <h1>Partners</h1>
-      <p class="lede">Your trading counterparties. On-network partners can net with you; off-network ones can only be reconciled.</p>
+      <p class="lede">Your trading counterparties. The tax ID is each partner’s primary identifier — on-network partners can net with you; off-network ones can only be reconciled.</p>
       <div class="card">
         <table>
           <thead><tr>
-            <th>Partner</th><th>Status</th><th class="r">Balance</th><th>Basis</th><th class="r">Invoices (cycle)</th>
+            <th>Partner</th><th>Status</th><th class="r">Balance</th><th>Basis</th><th class="r">Invoices (cycle)</th><th></th>
           </tr></thead>
-          <tbody>
-            <tr><td class="cp">Skyline Freight GmbH<span class="meta">Frankfurt · DE</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">+€6,150</td><td><span class="baltype">Agreed</span></td><td class="amt">4</td></tr>
-            <tr><td class="cp">Pacific Forwarders Ltd<span class="meta">Singapore · SG</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">+$5,700</td><td><span class="baltype">Agreed</span></td><td class="amt">2</td></tr>
-            <tr><td class="cp">Levant Cargo Co<span class="meta">Beirut · LB</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">−€7,650</td><td><span class="baltype">Agreed</span></td><td class="amt">1</td></tr>
-            <tr><td class="cp">Helvetia Air AG<span class="meta">Zürich · CH</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">+CHF 6,400</td><td><span class="baltype">Agreed</span></td><td class="amt">1</td></tr>
-            <tr><td class="cp">Nile Logistics<span class="meta">Cairo · EG</span></td><td><span class="pbadge off">Off-network</span></td><td class="amt">+€5,200</td><td><span class="baltype">Claimed</span></td><td class="amt">1</td></tr>
-            <tr><td class="cp">Adriatic Shipping<span class="meta">Rijeka · HR</span></td><td><span class="pbadge on">On-network</span></td><td class="amt">−€3,300</td><td><span class="baltype">Disputed</span></td><td class="amt">1</td></tr>
-          </tbody>
+          <tbody id="partners-body"></tbody>
         </table>
       </div>
-      <p class="hint" style="margin-top:14px">Balances are per-currency — no FX consolidation. “Agreed” means both ledgers matched; “Claimed” is your books only.</p>
+      <p class="hint" style="margin-top:14px">Balances are per-currency — no FX consolidation. “Agreed” means both ledgers matched; “Claimed” is your books only. Edit a partner to set its tax ID; on/off-network is derived from whether they upload a ledger.</p>
     </section>
+
+    <!-- edit-partner modal -->
+    <div class="modal-back" id="edit-back">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+        <h3 id="edit-title">Edit partner</h3>
+        <p class="sub">Identity details. The tax ID is the primary identifier and must be unique.</p>
+        <input type="hidden" id="edit-id">
+        <label for="edit-name">Legal name</label>
+        <input id="edit-name" type="text" autocomplete="off">
+        <label for="edit-tax">Tax ID <span class="hint">(VAT / EIN / registration — any format)</span></label>
+        <input id="edit-tax" type="text" class="mono" autocomplete="off" placeholder="—">
+        <label for="edit-country">Country <span class="hint">(ISO-2)</span></label>
+        <input id="edit-country" type="text" autocomplete="off" maxlength="2" placeholder="e.g. DE">
+        <label for="edit-group">Group ID <span class="hint">(sister-entity grouping, optional)</span></label>
+        <input id="edit-group" type="text" autocomplete="off" placeholder="—">
+        <div class="ro">Network status: <b id="edit-status">—</b> · derived from ledger uploads (read-only)</div>
+        <div class="err" id="edit-err"></div>
+        <div class="acts">
+          <button class="cancel" onclick="closeEditPartner()">Cancel</button>
+          <button class="save" onclick="savePartner()">Save changes</button>
+        </div>
+      </div>
+    </div>
 
     <!-- ============ UPLOAD ============ -->
     <section class="view hidden" id="view-upload">
@@ -468,6 +506,77 @@ function updateTally(){
   document.getElementById('tally-net').textContent = parts;
 }
 
+/* ---------- partners (tax_id primary identifier + edit) ---------- */
+let partners = [];
+
+async function loadPartners(){
+  try{
+    const res = await fetch('/parties');
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    partners = await res.json();
+  }catch(e){ console.error('Failed to load partners', e); return; }
+  renderPartners();
+}
+
+function balanceText(b){
+  if(!b || !b.length) return '<span style="color:var(--muted)">—</span>';
+  return b.map(x=> (x.net_major>0?'+':'') + fmt(x.net_major, x.currency)).join('  ·  ');
+}
+
+function renderPartners(){
+  const body = document.getElementById('partners-body');
+  body.innerHTML = partners.map(p=>{
+    const tax = p.tax_id
+      ? `<span class="tax"><span class="tlab">TAX</span> ${esc(p.tax_id)}</span>`
+      : `<span class="tax empty"><span class="tlab">TAX</span> —</span>`;
+    const loc = [p.city, p.country].filter(Boolean).join(' · ') || '—';
+    const status = p.on_network
+      ? '<span class="pbadge on">On-network</span>'
+      : '<span class="pbadge off">Off-network</span>';
+    return `<tr>
+      <td class="cp">${esc(p.legal_name)}${tax}<span class="meta">${esc(loc)}</span></td>
+      <td>${status}</td>
+      <td class="amt">${balanceText(p.balance)}</td>
+      <td><span class="baltype">${esc(p.basis)}</span></td>
+      <td class="amt">${p.invoices}</td>
+      <td class="r"><button class="p-edit" onclick="openEditPartner(${p.party_id})">Edit</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="hint" style="padding:14px">No partners yet.</td></tr>';
+}
+
+function openEditPartner(id){
+  const p = partners.find(x=>x.party_id===id);
+  if(!p) return;
+  document.getElementById('edit-id').value = p.party_id;
+  document.getElementById('edit-name').value = p.legal_name || '';
+  document.getElementById('edit-tax').value = p.tax_id || '';
+  document.getElementById('edit-country').value = p.country || '';
+  document.getElementById('edit-group').value = p.group_id==null ? '' : p.group_id;
+  document.getElementById('edit-status').textContent = p.on_network ? 'On-network' : 'Off-network';
+  const err = document.getElementById('edit-err'); err.classList.remove('show'); err.textContent='';
+  document.getElementById('edit-back').classList.add('show');
+}
+function closeEditPartner(){ document.getElementById('edit-back').classList.remove('show'); }
+document.getElementById('edit-back').addEventListener('click', e=>{ if(e.target.id==='edit-back') closeEditPartner(); });
+
+async function savePartner(){
+  const id = +document.getElementById('edit-id').value;
+  const body = {
+    legal_name: document.getElementById('edit-name').value.trim(),
+    tax_id:     document.getElementById('edit-tax').value.trim(),
+    country:    document.getElementById('edit-country').value.trim(),
+    group_id:   document.getElementById('edit-group').value.trim(),
+  };
+  const err = document.getElementById('edit-err');
+  try{
+    const res = await fetch('/parties/'+id, {method:'PATCH',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    if(!res.ok){ const e = await res.json().catch(()=>({})); throw new Error(e.detail||('HTTP '+res.status)); }
+    closeEditPartner();
+    await loadPartners();
+  }catch(e){ err.textContent = e.message; err.classList.add('show'); }
+}
+
 /* ---------- netting reveal (real, computed over canonical invoices) ---------- */
 function bars(el,n,cls){ el.innerHTML=''; for(let i=0;i<n;i++){const s=document.createElement('span'); s.style.height=(cls==='before'?(18+Math.random()*34):(34+Math.random()*18))+'px'; el.appendChild(s);} }
 
@@ -549,6 +658,7 @@ function go(v){
   document.querySelectorAll('.view').forEach(s=>s.classList.add('hidden'));
   document.getElementById('view-'+v).classList.remove('hidden');
   if(v==='netting'){ loadCycle(); loadNetting(); }
+  if(v==='partners'){ loadPartners(); }
   window.scrollTo({top:0});
 }
 document.querySelectorAll('.nav-item').forEach(n=> n.addEventListener('click',()=>go(n.dataset.view)));
@@ -665,7 +775,7 @@ async function loadObligations(){
   }
   render();
 }
-loadObligations(); loadCycle(); loadNetting();
+loadObligations(); loadCycle(); loadNetting(); loadPartners();
 </script>
 </body>
 </html>

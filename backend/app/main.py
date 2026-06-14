@@ -509,6 +509,131 @@ def confirm_resolution(payload: dict = Body(...), party_id: int = CURRENT_PARTY_
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Partners (Phase 8.7): tax_id is the primary identifier; partner info editable.
+# ---------------------------------------------------------------------------
+
+_PARTY_EDITABLE = ("legal_name", "tax_id", "country", "group_id")
+
+
+def _party_basis(conn, owner_id, partner_id, on_network):
+    """Off-network partners are reconciled from our books only ('Claimed'); for
+    on-network ones, a disputed disposition shows 'Disputed', otherwise 'Agreed'."""
+    if not on_network:
+        return "Claimed"
+    disputed = conn.execute(
+        "SELECT 1 FROM obligations WHERE owner_party_id = ? AND counterparty_party_id = ? "
+        "AND disposition = 'disputed' LIMIT 1", (owner_id, partner_id)).fetchone()
+    return "Disputed" if disputed else "Agreed"
+
+
+def _party_view(conn, owner_id, p):
+    """One partner row for the Partners view, with per-currency balance from the
+    signed-in party's ledger (AR positive, AP negative). on_network is derived."""
+    obs = conn.execute(
+        "SELECT direction, amount, currency FROM obligations "
+        "WHERE owner_party_id = ? AND counterparty_party_id = ?",
+        (owner_id, p["party_id"])).fetchall()
+    bal = {}
+    for o in obs:
+        sign = 1 if o["direction"] == "AR" else -1
+        bal[o["currency"]] = bal.get(o["currency"], 0) + sign * o["amount"]
+    balance = [{"currency": c, "net_major": refdata.to_major(v, refdata.exponent(conn, c))}
+               for c, v in bal.items()]
+    return {
+        "party_id": p["party_id"], "legal_name": p["legal_name"],
+        "tax_id": p["tax_id"], "country": p["country"], "city": p["city"],
+        "group_id": p["group_id"], "on_network": bool(p["on_network"]),
+        "invoices": len(obs), "balance": balance,
+        "basis": _party_basis(conn, owner_id, p["party_id"], p["on_network"]),
+    }
+
+
+@app.get("/parties")
+def list_parties(party_id: int = CURRENT_PARTY_ID):
+    """The signed-in party's trading partners, identity-first (tax_id primary).
+    Excludes the signed-in party itself and the network operator (admin)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM parties WHERE party_id != ? AND party_id NOT IN "
+            "(SELECT party_id FROM party_networks WHERE role = 'admin') "
+            "ORDER BY legal_name", (party_id,)).fetchall()
+        return [_party_view(conn, party_id, p) for p in rows]
+    finally:
+        conn.close()
+
+
+@app.patch("/parties/{party_id}")
+def edit_party(party_id: int, payload: dict = Body(...),
+               actor_party_id: int = CURRENT_PARTY_ID):
+    """Edit a partner's identity: legal_name, tax_id, country, group_id.
+
+    on_network is DERIVED from ledger ownership — not editable here. tax_id is
+    the primary identifier, so a value already owned by another party is blocked
+    (application-layer uniqueness; intentionally no DB UNIQUE constraint). Every
+    edit is recorded in the hash-chained audit log (identity is trust-critical).
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM parties WHERE party_id = ?", (party_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Unknown party.")
+
+        updates = {}
+        for f in _PARTY_EDITABLE:
+            if f not in payload:
+                continue
+            v = payload[f]
+            if isinstance(v, str):
+                v = v.strip()
+            if f == "legal_name":
+                if not v:
+                    raise HTTPException(400, "legal_name cannot be empty.")
+            elif f == "tax_id":
+                v = v or None                       # blank clears the identifier
+            elif f == "country":
+                v = (v or None)
+                if v:
+                    v = v.upper()
+            elif f == "group_id":
+                v = int(v) if v not in (None, "") else None
+            updates[f] = v
+        if not updates:
+            raise HTTPException(400, "No editable fields provided.")
+
+        # tax_id uniqueness (primary identifier) — enforced in app code, not the
+        # DB. Compare normalized so "DE 811907980" and "DE811907980" collide.
+        if updates.get("tax_id"):
+            norm = resolve.normalize_taxid(updates["tax_id"])
+            for other in conn.execute(
+                "SELECT party_id, legal_name, tax_id FROM parties WHERE party_id != ?",
+                (party_id,)):
+                if other["tax_id"] and resolve.normalize_taxid(other["tax_id"]) == norm:
+                    raise HTTPException(
+                        409, f"tax_id is already used by {other['legal_name']} "
+                             f"(party {other['party_id']}). Each party's tax_id must be unique.")
+
+        before = {f: row[f] for f in _PARTY_EDITABLE}
+        sets = ", ".join(f"{f} = ?" for f in updates)
+        conn.execute(f"UPDATE parties SET {sets} WHERE party_id = ?",
+                     (*updates.values(), party_id))
+        # jurisdiction (Delos seam) stays derived from country.
+        if "country" in updates:
+            conn.execute("UPDATE parties SET jurisdiction = ? WHERE party_id = ?",
+                         (refdata.iso3(updates["country"]), party_id))
+
+        after = {**before, **updates}
+        audit.append(conn, actor=f"party:{actor_party_id}", action="party.edit",
+                     entity_ref=f"party:{party_id}", before=before, after=after)
+        conn.commit()
+        updated = conn.execute("SELECT * FROM parties WHERE party_id = ?",
+                               (party_id,)).fetchone()
+        return _party_view(conn, actor_party_id, updated)
+    finally:
+        conn.close()
+
+
 _PHASE = {"open": "Open", "reconciling": "Reconciling", "locked": "Locked",
           "netted": "Netted", "closed": "Closed"}
 _PROGRESS = {"open": 0.3, "reconciling": 0.62, "locked": 0.85, "netted": 0.95, "closed": 1.0}
