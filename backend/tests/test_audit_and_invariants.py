@@ -46,10 +46,10 @@ def test_engine_is_deterministic(conn):
     assert snapshot() == first
 
 
-def test_savings_recompute_from_counts(client):
+def test_reveal_fee_only_when_settlements_drop(client):
     d = client.get("/netting").json()
-    party_elim, network_elim = d["party"]["eliminated"], d["network"]["eliminated"]
-    cpp = d["savings"]["cost_per_payment"]
-    # the reveal recomputes savings live as cost-per-payment changes (frontend math)
-    assert party_elim * cpp == 3 * 35.0
-    assert network_elim * cpp == 5 * 35.0
+    st, cpp = d["settlements"], d["savings"]["cost_per_payment"]
+    # Honest, never a double-count: fee saved == distinct settlements eliminated ×
+    # cost-per-payment. The seed's flows are bilateral, so nothing drops → €0.
+    assert st["fee_saved_minor"] == st["eliminated"] * int(round(cpp * 100))
+    assert st["eliminated"] == 0 and st["fee_saved_minor"] == 0

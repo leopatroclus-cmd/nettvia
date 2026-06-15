@@ -38,8 +38,12 @@ def test_known_party_positions(client):
     d = client.get("/netting").json()
     pos = {p["currency"]: p["net_major"] for p in d["party"]["positions"]}
     assert pos == {"EUR": -17050, "USD": 9800, "CHF": 6400}
-    assert d["party"]["gross"] == 6 and d["party"]["net"] == 3        # compression 6→3
-    assert d["network"]["eliminated"] == 5
+    # VALUE compression (no double-count): gross that would move vs net.
+    assert d["compression"]["held_back_pct"] > 0
+    # Honest settlement count: the seed's flows are bilateral (Aegean↔each), so
+    # multilateral netting doesn't drop distinct settlements → no fee claimed.
+    assert d["settlements"]["eliminated"] == 0
+    assert d["settlements"]["fee_saved_minor"] == 0
 
 
 def test_netting_over_locked_snapshot_matches_provisional(client, conn):

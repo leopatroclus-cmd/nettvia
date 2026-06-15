@@ -867,27 +867,11 @@ def _working_cycle(conn, network_id, cycle_id=None):
     return cycles.working_cycle(conn, network_id)
 
 
-def _focus_cycle(conn, network_id, cycle_id=None):
-    """Cycle the Netting reveal AND the default statement show. Prefer the most
-    recent FINALIZED cycle (persisted net_positions) so that after Run netting both
-    stay on the JUST-SETTLED closed cycle (its real compression number) instead of
-    snapping to the freshly-opened empty cycle. Before anything has netted, fall back
-    to the working cycle for a provisional view."""
-    if cycle_id:
-        return conn.execute("SELECT * FROM cycles WHERE cycle_id = ?", (cycle_id,)).fetchone()
-    finalized = conn.execute(
-        "SELECT c.* FROM cycles c WHERE c.network_id = ? AND EXISTS "
-        "(SELECT 1 FROM net_positions np WHERE np.cycle_id = c.cycle_id) "
-        "ORDER BY c.sequence_no DESC LIMIT 1", (network_id,)).fetchone()
-    return finalized or _working_cycle(conn, network_id)
-
-
 def _netting_response(conn, cycle, party_id):
     result = netting.compute(conn, cycle)
-    gross, net = netting.compression(result["invoices"], result["positions"])
-    net_gross, net_net = sum(gross.values()), sum(net.values())
 
     party_positions = []
+    p_gross_minor = p_net_minor = 0
     for s in result["positions"]:
         if s["party_id"] != party_id:
             continue
@@ -901,6 +885,8 @@ def _netting_response(conn, cycle, party_id):
             "gross_payable_major": refdata.to_major(s["payable"], exp),
             "reconstruction_key": s["reconstruction_key"],
         })
+        p_gross_minor += s["receivable"] + s["payable"]   # cash that would have moved
+        p_net_minor += abs(s["net"])                       # cash that actually moves
 
     counterparties = set()
     for ci in result["invoices"]:
@@ -909,10 +895,25 @@ def _netting_response(conn, cycle, party_id):
         elif ci["payer_id"] == party_id:
             counterparties.add(ci["biller_id"])
 
+    # VALUE compression (same definitions as the statement — the views can't
+    # disagree): gross that would have moved vs net that actually moves, per ccy.
+    gross_by_ccy, net_by_ccy = {}, {}
+    for ci in result["invoices"]:
+        gross_by_ccy[ci["currency"]] = gross_by_ccy.get(ci["currency"], 0) + ci["gross_amount_minor"]
+    for s in result["positions"]:
+        if s["net"] > 0:
+            net_by_ccy[s["currency"]] = net_by_ccy.get(s["currency"], 0) + s["net"]
+    tot_gross, tot_net = sum(gross_by_ccy.values()), sum(net_by_ccy.values())
+
+    # Honest distinct-settlement reduction (0 on a closed ring) — gates any fee
+    # claim so the reveal never double-counts both legs of each settlement.
+    before, after = netting.settlement_counts(result["invoices"], result["positions"])
+    eliminated = max(0, before - after)
+
     cfg = conn.execute(
         "SELECT cost_per_payment, cycle_length_days FROM networks WHERE network_id = ?",
         (cycle["network_id"],)).fetchone()
-    p_gross, p_net = gross.get(party_id, 0), net.get(party_id, 0)
+    cpp = cfg["cost_per_payment"] or 0
     return {
         "cycle_id": cycle["cycle_id"], "label": (cycle["opens_at"] or "")[:7],
         "state": cycle["state"], "provisional": result["provisional"],
@@ -921,16 +922,22 @@ def _netting_response(conn, cycle, party_id):
         "days_to_settle": _days_to(cycle["settlement_date"]),
         "party": {
             "positions": party_positions,
-            "gross": p_gross, "net": p_net, "eliminated": p_gross - p_net,
-            "pct": round(100 * (p_gross - p_net) / p_gross) if p_gross else 0,
             "counterparties": len(counterparties),
+            "gross_value_major": refdata.to_major(p_gross_minor, 2),
+            "net_value_major": refdata.to_major(p_net_minor, 2),
+            "held_back_pct": round(100 * (p_gross_minor - p_net_minor) / p_gross_minor) if p_gross_minor else 0,
         },
-        "network": {
-            "gross": net_gross, "net": net_net, "eliminated": net_gross - net_net,
-            "pct": round(100 * (net_gross - net_net) / net_gross) if net_gross else 0,
+        "compression": {           # VALUE story (network), mirrors the statement
+            "gross_settled": _money_list(conn, gross_by_ccy),
+            "net_to_settle": _money_list(conn, net_by_ccy),
+            "held_back_pct": round(100 * (tot_gross - tot_net) / tot_gross) if tot_gross else 0,
+        },
+        "settlements": {           # honest count — 0 on a ring → no fee claimed
+            "before": before, "after": after, "eliminated": eliminated,
+            "fee_saved_minor": eliminated * int(round(cpp * 100)),
         },
         "savings": {
-            "cost_per_payment": cfg["cost_per_payment"] or 0,
+            "cost_per_payment": cpp,
             "cycles_per_year": round(365 / (cfg["cycle_length_days"] or 30)),
         },
         "sum_by_currency": result["sum_by_currency"],
@@ -940,13 +947,14 @@ def _netting_response(conn, cycle, party_id):
 @app.get("/netting")
 def get_netting(party_id: int = Depends(current_party_id), network_id: int = 1,
                 cycle_id: int = None):
-    """Netting reveal (regenerable). Defaults to the FOCUS cycle: provisional while
-    a cycle is being worked, and the just-settled cycle right after Run netting (it
-    does not snap to the new empty cycle). An explicit cycle_id pins a specific one."""
+    """Netting reveal (regenerable). Defaults to the WORKING cycle — the one being
+    built/locked, shown PROVISIONALLY ('no funds moved'). It deliberately tracks
+    the live cycle, not the last settled one; settled statements live in History.
+    An explicit cycle_id pins a specific (e.g. just-closed) cycle for the reveal."""
     conn = get_conn()
     try:
         _require_audit_ok(conn)
-        cycle = _focus_cycle(conn, network_id, cycle_id)
+        cycle = _working_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No active cycle.")
         return _netting_response(conn, cycle, party_id)
@@ -1017,7 +1025,7 @@ def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, n
     conn = get_conn()
     try:
         _require_audit_ok(conn)
-        cycle = _focus_cycle(conn, network_id, cycle_id)
+        cycle = _working_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No cycle.")
         try:
@@ -1028,9 +1036,9 @@ def statement(party_id: int = Depends(current_party_id), cycle_id: int = None, n
             "party_id": party_id, "cycle_id": r["cycle_id"], "label": r["label"],
             "state": r["state"], "provisional": r["provisional"],
             "settlement_date": r["settlement_date"],
-            "invoice_count": r["party"]["gross"],
             "positions": r["party"]["positions"],   # net + gross AR/AP + reconstruction_key per currency
-            "compression": {k: r["party"][k] for k in ("gross", "net", "eliminated", "pct")},
+            "compression": r["compression"],        # VALUE: gross→net + % held back
+            "settlements": r["settlements"],        # honest distinct-settlement reduction
             "savings": r["savings"],
         }
     finally:
@@ -1223,7 +1231,7 @@ def statement_summary(cycle_id: int = None, network_id: int = 1,
     conn = get_conn()
     try:
         _require_audit_ok(conn)
-        cycle = _focus_cycle(conn, network_id, cycle_id)
+        cycle = _working_cycle(conn, network_id, cycle_id)
         if cycle is None:
             raise HTTPException(404, "No cycle.")
         projection_cfg = {

@@ -143,3 +143,27 @@ def compression(invoices, positions):
         if s["net"] != 0:
             net[s["party_id"]] = net.get(s["party_id"], 0) + 1
     return gross, net
+
+
+def settlement_counts(invoices, positions):
+    """Honest DISTINCT-settlement reduction from multilateral netting — never a
+    double-count, so the reveal can't contradict the statement.
+
+    before = distinct (party-pair, currency) with a non-zero net BILATERAL balance
+             (the realistic baseline: treasuries already net bilaterally with each
+             counterparty, so each such pair is one settlement);
+    after  = non-zero multilateral net positions (each settles once with the pool).
+
+    On a closed ring before == after (every party already settles once, in and out
+    cancel) → 0 eliminated. Multilateral netting only drops distinct settlements
+    when debt CYCLES collapse (bilateral/hub flows with many legs per pair)."""
+    bal = {}
+    for ci in invoices:
+        b, p = ci["biller_id"], ci["payer_id"]
+        lo, hi = (b, p) if b < p else (p, b)
+        sign = 1 if b == lo else -1
+        key = (lo, hi, ci["currency"])
+        bal[key] = bal.get(key, 0) + sign * ci["gross_amount_minor"]
+    before = sum(1 for v in bal.values() if v != 0)
+    after = sum(1 for s in positions if s["net"] != 0)
+    return before, after

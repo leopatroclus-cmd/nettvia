@@ -380,43 +380,28 @@
       <div class="pos-grid" id="pos-grid"></div>
 
       <div class="reveal">
-        <span class="tag">The reveal · your cycle</span>
+        <span class="tag">The reveal · your cycle <span id="reveal-prov" class="hint"></span></span>
         <div class="collapse">
           <div class="cstat">
-            <div class="big" id="gross-count">0</div>
-            <div class="lab"><b>gross invoices</b> across <span id="gross-cps">0</span> counterparties</div>
+            <div class="big" id="gross-val">€0</div>
+            <div class="lab"><b>gross</b> — cash that would move</div>
             <div class="bars before" id="bars-before"></div>
           </div>
           <div class="arrow">→<small>NETTED</small></div>
           <div class="cstat">
-            <div class="big after" id="net-count">0</div>
-            <div class="lab"><b>net payments</b> to settle</div>
+            <div class="big after" id="net-val">€0</div>
+            <div class="lab"><b>net</b> — cash that actually moves</div>
             <div class="bars after" id="bars-after"></div>
           </div>
         </div>
         <div class="eliminated">
           <span class="pct" id="elim-pct">0%</span>
-          <span class="txt"><b id="elim-n">0 payments eliminated</b> this cycle — fewer wires, fewer reconciliations, fewer FX legs.</span>
+          <span class="txt"><b id="held-txt">€0 held back</b> this cycle — value compressed, no funds moved.</span>
         </div>
 
-        <div class="savings">
-          <div class="save-card">
-            <div class="k">Estimated saving · this cycle</div>
-            <div class="v" id="save-cycle">€210</div>
-            <div class="assume">
-              <span>Cost per payment</span>
-              <span>€</span><input id="cpp" type="number" value="35" min="0" step="5">
-              <span class="calc" id="save-calc">6 avoided × €35</span>
-            </div>
-          </div>
-          <div class="save-card agg">
-            <div class="k">Across NAP · this cycle</div>
-            <div class="v" id="save-agg">€43,120 <span class="yr">/cycle</span></div>
-            <div class="sub"><b id="agg-elim">1,232 payments</b> eliminated network-wide · ≈ <b id="agg-year">€517k</b> a year</div>
-          </div>
-        </div>
+        <div class="savings" id="reveal-savings"><!-- fee card only when distinct settlements drop --></div>
       </div>
-      <p class="hint" style="margin-top:14px">Payment-fee saving only. FX-spread and working-capital savings are larger, separate levers — added later.</p>
+      <p class="hint" id="reveal-foot" style="margin-top:14px"></p>
       <p style="margin-top:16px"><button class="confirm" onclick="go('statement')">View full statement →</button></p>
     </section>
 
@@ -781,50 +766,69 @@ async function savePartner(){
 /* ---------- netting reveal (real, computed over canonical invoices) ---------- */
 function bars(el,n,cls){ el.innerHTML=''; for(let i=0;i<n;i++){const s=document.createElement('span'); s.style.height=(cls==='before'?(18+Math.random()*34):(34+Math.random()*18))+'px'; el.appendChild(s);} }
 
-// Filled by loadNetting(); recalcSavings() recomputes live as cost-per-payment changes.
-let netState = {partyEliminated:0, networkEliminated:0, cyclesPerYear:12};
+// Filled by loadNetting(); the fee card (if shown) recomputes live as cpp changes.
+let netState = {eliminated:0, cpp:35};
 
 async function loadNetting(){
+  let d;
   try{
     const res = await fetch('/netting');
     if(!res.ok) return;
-    const d = await res.json();
-    const prov = d.provisional ? ' · provisional' : '';
-    const cards = d.party.positions.map(p=>{
-      const cls = p.direction==='pay'?'pay':(p.direction==='receive'?'recv':'');
-      const x = p.direction==='pay'?'you pay':(p.direction==='receive'?'you receive':'flat');
-      const v = (p.net_major>0?'+':'') + fmt(p.net_major, p.currency);
-      return `<div class="pos"><div class="k">Net — ${p.currency}</div><div class="v ${cls}">${v}</div><div class="x">${x}${prov}</div></div>`;
+    d = await res.json();
+  }catch(e){ return; }
+
+  const prov = d.provisional;
+  // Your per-currency net positions (no funds moved).
+  const cards = d.party.positions.map(p=>{
+    const cls = p.direction==='pay'?'pay':(p.direction==='receive'?'recv':'');
+    const x = p.direction==='pay'?'you pay':(p.direction==='receive'?'you receive':'flat');
+    const v = (p.net_major>0?'+':'') + fmt(p.net_major, p.currency);
+    return `<div class="pos"><div class="k">Net — ${p.currency}</div><div class="v ${cls}">${v}</div><div class="x">${x}${prov?' · provisional':''}</div></div>`;
+  });
+  cards.push(`<div class="pos"><div class="k">Settles in</div><div class="v">${d.days_to_settle!=null?d.days_to_settle+' days':'—'}</div><div class="x">projected · no funds moved</div></div>`);
+  document.getElementById('pos-grid').innerHTML = cards.join('');
+
+  // LEAD with VALUE compression (gross → net, % held back) — always true.
+  const comp = d.compression;
+  document.getElementById('reveal-prov').textContent = prov ? '· provisional · no funds moved' : '· settled snapshot';
+  document.getElementById('gross-val').textContent = moneyList(comp.gross_settled);
+  document.getElementById('net-val').textContent = moneyList(comp.net_to_settle);
+  document.getElementById('elim-pct').textContent = comp.held_back_pct + '%';
+  const held = comp.gross_settled.map(g=>{
+    const ns = (comp.net_to_settle.find(x=>x.currency===g.currency)||{}).major || 0;
+    return {currency:g.currency, major:g.major - ns};
+  });
+  document.getElementById('held-txt').textContent = `${moneyList(held)} held back`;
+  const st = d.settlements;
+  bars(document.getElementById('bars-before'), Math.max(st.before,1), 'before');
+  bars(document.getElementById('bars-after'), Math.max(st.after,1), 'after');
+
+  // FEE saving: ONLY where distinct settlements actually drop (0 on a closed
+  // ring) — same logic as the statement, so the two views can't disagree.
+  netState = {eliminated: st.eliminated, cpp: d.savings.cost_per_payment};
+  renderRevealSavings();
+}
+
+function renderRevealSavings(){
+  const box = document.getElementById('reveal-savings');
+  const foot = document.getElementById('reveal-foot');
+  if(netState.eliminated > 0){
+    const cpp = netState.cpp, e = netState.eliminated;
+    box.innerHTML = `<div class="save-card">
+      <div class="k">Settlements eliminated · this cycle</div>
+      <div class="v" id="save-cycle">€${(e*cpp).toLocaleString('en-US')}</div>
+      <div class="assume"><span>${e} fewer settlement${e===1?'':'s'} ×</span><span>€</span><input id="cpp" type="number" value="${cpp}" min="0" step="5"><span class="calc">/payment</span></div>
+    </div>`;
+    document.getElementById('cpp').addEventListener('input', e2=>{
+      netState.cpp = Math.max(0, +e2.target.value || 0);
+      document.getElementById('save-cycle').textContent = '€'+(netState.eliminated*netState.cpp).toLocaleString('en-US');
     });
-    cards.push(`<div class="pos"><div class="k">Settles in</div><div class="v">${d.days_to_settle!=null?d.days_to_settle+' days':'—'}</div><div class="x">projected · no funds moved</div></div>`);
-    document.getElementById('pos-grid').innerHTML = cards.join('');
-
-    document.getElementById('gross-count').textContent = d.party.gross;
-    document.getElementById('gross-cps').textContent = d.party.counterparties;
-    document.getElementById('net-count').textContent = d.party.net;
-    document.getElementById('elim-pct').textContent = d.party.pct+'%';
-    document.getElementById('elim-n').textContent =
-      `${d.party.eliminated} payment${d.party.eliminated===1?'':'s'} eliminated`;
-    bars(document.getElementById('bars-before'), Math.max(d.party.gross,1), 'before');
-    bars(document.getElementById('bars-after'), Math.max(d.party.net,1), 'after');
-
-    netState = {partyEliminated:d.party.eliminated, networkEliminated:d.network.eliminated,
-                cyclesPerYear:d.savings.cycles_per_year};
-    document.getElementById('cpp').value = d.savings.cost_per_payment;
-    recalcSavings();
-  }catch(e){ /* no active cycle / netting */ }
+    foot.textContent = 'Distinct settlements that genuinely drop on this flow (fee-only). FX and working-capital are separate levers — see the statement for the at-scale projection.';
+  } else {
+    box.innerHTML = '';
+    foot.textContent = "This cycle's benefit is value compression — on a closed ring each party still settles once, so distinct settlements don't drop and no per-cycle fee saving is claimed. See the statement for the at-scale projection.";
+  }
 }
-
-function recalcSavings(){
-  const cpp = Math.max(0, +document.getElementById('cpp').value || 0);
-  const e = netState.partyEliminated, agg = netState.networkEliminated, cy = netState.cyclesPerYear || 12;
-  document.getElementById('save-cycle').textContent = '€'+(e*cpp).toLocaleString('en-US');
-  document.getElementById('save-calc').textContent = `${e} avoided × €${cpp}`;
-  document.getElementById('save-agg').innerHTML = '€'+(agg*cpp).toLocaleString('en-US')+' <span class="yr">/cycle</span>';
-  document.getElementById('agg-elim').textContent = agg.toLocaleString('en-US')+' payments';
-  document.getElementById('agg-year').textContent = '€'+Math.round(agg*cpp*cy/1000)+'k';
-}
-document.getElementById('cpp').addEventListener('input', recalcSavings);
 
 /* ---------- statement (presentation-grade cycle reveal) ---------- */
 const moneyList = a => (a && a.length) ? a.map(m=>fmt(m.major, m.currency)).join('  ·  ') : '€0';

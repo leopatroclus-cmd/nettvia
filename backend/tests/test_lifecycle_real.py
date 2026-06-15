@@ -41,7 +41,7 @@ def test_real_accept_net_then_lock_freezes_and_nets(client, conn):
     client.post("/cycles/1/close-uploads")
     frozen = client.post("/cycles/1/lock").json()["frozen"]
     assert frozen > 0                                          # 4 obligations (2 pairs)
-    assert client.get("/netting").json()["party"]["gross"] > 0
+    assert client.get("/netting").json()["party"]["gross_value_major"] > 0
     client.post("/cycles/1/net")
     gross = {m["currency"]: m["major"]
              for m in client.get("/statement/summary", params={"cycle_id": 1}).json()["network"]["gross_settled"]}
@@ -60,11 +60,11 @@ def test_real_pending_uploads_are_nettable_and_freeze(client, conn):
     # ...yet the app presents them as nettable, and provisional netting counts them.
     obs = client.get("/obligations").json()
     assert obs and all(o["nettable"] and o["disp"] == "net" for o in obs)
-    provisional_gross = client.get("/netting").json()["party"]["gross"]
+    provisional_gross = client.get("/netting").json()["party"]["gross_value_major"]
     assert provisional_gross > 0
 
     client.post("/cycles/1/close-uploads")
     frozen = client.post("/cycles/1/lock").json()["frozen"]
     assert frozen > 0, "lock must freeze what the UI/provisional view show as nettable"
     # Locked snapshot agrees with the provisional view (no drop to 0).
-    assert client.get("/netting").json()["party"]["gross"] == provisional_gross
+    assert client.get("/netting").json()["party"]["gross_value_major"] == provisional_gross

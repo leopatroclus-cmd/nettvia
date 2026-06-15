@@ -72,20 +72,24 @@ def test_reconcile_all_empty_keeps_latest(client, conn):
     assert len(remaining) == 1 and remaining[0]["cycle_id"] == 2   # latest kept as working
 
 
-def test_runbook_reveal_and_statement_land_on_settled_after_net(client, conn):
+def test_runbook_settled_statement_via_cycle_id_live_views_track_working(client, conn):
     client.post("/cycles/1/close-uploads")
     client.post("/cycles/1/lock")
     client.post("/cycles/1/net")
 
-    # Reveal + default statement stay on the JUST-SETTLED closed cycle 1 (real
-    # numbers), NOT the freshly-opened empty cycle.
-    assert client.get("/netting").json()["party"]["gross"] > 0
-    stmt = client.get("/statement/summary").json()
-    assert stmt["cycle_id"] == 1 and stmt["network"]["gross_settled"]
+    # Reveal moment PRESERVED: the just-closed cycle's settled statement is
+    # rendered via an explicit cycle_id (this is what post-net showStatement does).
+    settled = client.get("/statement/summary", params={"cycle_id": 1}).json()
+    assert settled["cycle_id"] == 1 and settled["network"]["gross_settled"]
 
-    # Accounts, separately, shows the NEW open working cycle (rolled obligations).
+    # Live views (default /netting + default /statement) now track the NEW WORKING
+    # cycle provisionally — they do NOT stay pinned to the settled one.
     cur = client.get("/cycles/current").json()
     assert cur["cycle_id"] != 1 and cur["state"] == "open"
+    assert client.get("/netting").json()["cycle_id"] == cur["cycle_id"]
+    assert client.get("/statement/summary").json()["cycle_id"] == cur["cycle_id"]
+
+    # Accounts shows the new open working cycle (rolled obligations).
     ids = {o["id"] for o in client.get("/obligations").json()}
     nile = conn.execute(
         "SELECT obligation_id FROM obligations WHERE invoice_number='AEG-2044'").fetchone()[0]
